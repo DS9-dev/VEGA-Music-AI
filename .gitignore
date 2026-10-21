@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-tests/
+release/
+data/
+Library/
+build/root.json
+*.log

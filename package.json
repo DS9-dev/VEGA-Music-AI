@@ -1,0 +1,61 @@
+{
+  "name": "vega-music-ai",
+  "productName": "VEGA-Music-AI",
+  "version": "1.0.0",
+  "description": "VEGA-Music-AI — генератор песен на локальных моделях: текст (LM Studio) и музыка (ACE-Step 1.5)",
+  "private": true,
+  "main": "dist/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node scripts/build.mjs && electron .",
+    "dev": "node scripts/build.mjs --dev && electron .",
+    "dist": "node scripts/build.mjs && electron-builder --win dir",
+    "test": "node scripts/test.mjs",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "esbuild": "^0.25.5",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "typescript": "^5.8.3"
+  },
+  "build": {
+    "appId": "app.vega.musicai",
+    "productName": "VEGA-Music-AI",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/root.json",
+        "to": "root.json"
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "icon": "build/icon.png",
+      "executableName": "VEGA-Music-AI"
+    },
+    "asar": true,
+    "electronLanguages": [
+      "ru",
+      "en-US"
+    ]
+  },
+  "license": "MIT",
+  "author": "DS9-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DS9-dev/VEGA-Music-AI.git"
+  }
+}
