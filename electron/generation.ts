@@ -1,4 +1,5 @@
 /** Оркестрация: генерация текста (LM Studio) и трека (ACE-Step) с прогрессом. */
+import { basename } from 'node:path';
 import type { AceClient } from './ace';
 import type { Library } from './library';
 import type { LmStudio } from './lmstudio';
@@ -51,9 +52,19 @@ export interface GeneratorDeps {
   unloadLlm: () => Promise<void>;
   saveCalibration: (variants: 1 | 2, secPerAudioSec: number) => void;
   onUpdate: (s: JobState) => void;
+  /** Голосовые модели (V2). Без них трек поётся голосом ACE-Step. */
+  voice?: {
+    name: (id: string) => string | null; // null — голос не готов
+    beforeApply: () => Promise<void>; // освобождение видеопамяти
+    apply: (voiceId: string, input: string, out: string, shift: number | null,
+      onProgress: (frac: number, text: string) => void, signal: AbortSignal) => Promise<string>;
+  };
 }
 
-const IDLE: JobState = { id: '', phase: 'idle', title: '', progress: 0, step: 0, stageLabel: '', detail: '', elapsedSec: 0, etaSec: null };
+const STEPS = ['Подготовка', 'Композиция', 'Синтез', 'Сохранение'];
+const STEPS_VOICE = ['Подготовка', 'Композиция', 'Синтез', 'Голос', 'Сохранение'];
+
+const IDLE: JobState = { id: '', kind: 'track', phase: 'idle', title: '', progress: 0, step: 0, stageLabel: '', detail: '', elapsedSec: 0, etaSec: null };
 
 const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((res, rej) => {
   const t = setTimeout(res, ms);
@@ -75,8 +86,11 @@ export class Generator {
 
   start(p: TrackParams, title: string, lyrics: string): string {
     if (this.busy) throw new Error('Уже идёт генерация трека');
+    if (this.blocked?.()) throw new Error('Видеокарта занята заданием с голосом. Дождитесь окончания.');
+    const withVoice = !!p.voiceId && !p.instrumental;
+    if (withVoice && !this.d.voice?.name(p.voiceId!)) throw new Error('Выбранный голос ещё не готов — выберите другой или дождитесь окончания обучения');
     const id = `job_${Date.now()}`;
-    this.state = { ...IDLE, id, phase: 'preparing', title: title || 'Без названия', stageLabel: 'Подготовка', detail: 'Готовим запрос…' };
+    this.state = { ...IDLE, id, steps: withVoice ? STEPS_VOICE : STEPS, phase: 'preparing', title: title || 'Без названия', stageLabel: 'Подготовка', detail: 'Готовим запрос…' };
     this.d.onUpdate(this.state);
     this.abort = new AbortController();
     void this.run(p, title, lyrics, this.abort.signal).catch((e) => {
@@ -87,6 +101,9 @@ export class Generator {
   }
 
   cancel() { this.abort?.abort(); }
+
+  /** Проверка внешней занятости видеокарты (задания с голосом). */
+  blocked?: () => boolean;
 
   reset() { if (!this.busy) { this.state = { ...IDLE }; this.d.onUpdate(this.state); } }
 
@@ -114,6 +131,9 @@ export class Generator {
 
     const variants = p.variants;
     const expected = s.calibration[String(variants) as '1' | '2'] * p.duration + s.calibration.overhead;
+    const withVoice = !!p.voiceId && !p.instrumental && !!this.d.voice;
+    const genShare = withVoice ? 0.62 : 0.92;
+    const voiceExpected = withVoice ? variants * (40 + p.duration * 0.45) : 0;
     const genStart = Date.now();
     let gen = 0;
     this.set({ phase: 'generating', step: 1, stageLabel: 'Композиция', detail: 'Сочиняем мелодию и аранжировку', progress: 0.04 });
@@ -124,7 +144,7 @@ export class Generator {
       const genElapsed = (Date.now() - genStart) / 1000;
       if (q?.status === 2) throw new Error(`ACE-Step: ${q.error}`);
       if (q?.status === 1) {
-        await this.save(p, title, lyrics, q.files, taskId, elapsed());
+        await this.save(p, title, lyrics, q.files, taskId, t0, signal);
         this.d.saveCalibration(variants, Math.max(0.1, (genElapsed - s.calibration.overhead) / p.duration));
         return;
       }
@@ -140,24 +160,31 @@ export class Generator {
       const detail = step === 1 ? 'Сочиняем мелодию и аранжировку' : gen > 0.9 ? 'Декодируем и собираем аудио' : 'Синтезируем инструменты и вокал';
       let eta = expected - genElapsed;
       if (real > 0.15) eta = 0.5 * eta + 0.5 * (genElapsed * (1 - real) / real);
+      eta += voiceExpected;
       this.set({
-        step, stageLabel: label, detail, progress: 0.04 + 0.92 * gen, elapsedSec: elapsed(),
+        step, stageLabel: label, detail, progress: 0.04 + genShare * gen, elapsedSec: elapsed(),
         etaSec: eta > 2 ? Math.round(eta) : null,
       });
     }
   }
 
-  private async save(p: TrackParams, title: string, lyrics: string, files: { file: string; seed?: string }[], taskId: string, seconds: number) {
+  private async save(p: TrackParams, title: string, lyrics: string, files: { file: string; seed?: string }[], taskId: string, t0: number, signal: AbortSignal) {
     if (!files.length) throw new Error('ACE-Step не вернул аудио');
     const s = this.d.settings();
-    this.set({ phase: 'saving', step: 3, stageLabel: 'Сохранение', detail: 'Сохраняем трек в библиотеку…', progress: 0.97 });
+    const withVoice = !!p.voiceId && !p.instrumental && !!this.d.voice;
+    const last = withVoice ? 4 : 3;
+    const seconds = () => Math.round((Date.now() - t0) / 1000);
+    this.set({
+      phase: withVoice ? 'generating' : 'saving', step: withVoice ? 3 : 3,
+      stageLabel: withVoice ? 'Голос' : 'Сохранение', detail: 'Получаем аудио от ACE-Step…', progress: withVoice ? 0.66 : 0.97,
+    });
     const id = this.d.library.allocate(title);
-    const variants = [] as Track['variants'];
+    const originals = [] as Track['variants'];
     for (let i = 0; i < files.length; i++) {
       const ext = (files[i].file.match(/\.(mp3|wav|flac|ogg)(?:$|[?&])/i)?.[1] ?? s.audioFormat).toLowerCase();
-      const name = `variant-${i + 1}.${ext}`;
+      const name = withVoice ? `variant-${i + 1}-ace.${ext}` : `variant-${i + 1}.${ext}`;
       await this.d.ace.download(files[i].file, this.d.library.filePath(id, name));
-      variants.push({ file: name, seed: files[i].seed });
+      originals.push({ file: name, seed: files[i].seed, ...(withVoice ? { label: `Вариант ${i + 1} · ACE`, original: true } : {}) });
     }
     const track: Track = {
       id,
@@ -167,11 +194,40 @@ export class Generator {
       lyrics: lyricsForAce(p, lyrics),
       caption: buildCaption(p),
       bpm: timing(p).bpm,
-      variants,
-      generationSeconds: Math.round(seconds),
+      variants: originals,
+      generationSeconds: seconds(),
     };
-    this.d.library.write(track);
     void taskId;
-    this.set({ phase: 'done', step: 3, stageLabel: 'Готово', detail: 'Трек сохранён в библиотеку', progress: 1, trackId: id, etaSec: null, elapsedSec: Math.round(seconds) });
+
+    if (withVoice) {
+      const voiceName = this.d.voice!.name(p.voiceId!) ?? 'голос';
+      track.voiceName = voiceName;
+      const converted = [] as Track['variants'];
+      try {
+        this.set({ detail: 'Освобождаем видеопамять для голоса…' });
+        await this.d.voice!.beforeApply();
+        for (let i = 0; i < originals.length; i++) {
+          const out = this.d.library.filePath(id, `variant-${i + 1}.${s.audioFormat}`);
+          const file = await this.d.voice!.apply(p.voiceId!, this.d.library.filePath(id, originals[i].file), out, p.voiceShift, (f, text) => {
+            const n = originals.length;
+            this.set({ progress: 0.66 + 0.3 * ((i + f) / n), detail: `${text}${n > 1 ? ` · вариант ${i + 1} из ${n}` : ''}`, elapsedSec: seconds() });
+          }, signal);
+          converted.push({ file: basename(file), seed: originals[i].seed, label: `Вариант ${i + 1}` });
+        }
+      } catch (e: any) {
+        if (e?.name === 'AbortError') throw e;
+        track.variants = originals;
+        track.generationSeconds = seconds();
+        this.d.library.write(track);
+        this.set({ phase: 'error', stageLabel: 'Ошибка голоса', trackId: id, etaSec: null,
+          error: `Перепеть голосом «${voiceName}» не удалось. Исходные варианты ACE-Step сохранены в библиотеке.\n\n${e?.message ?? e}` });
+        return;
+      }
+      track.variants = [...converted, ...originals];
+    }
+    this.set({ phase: 'saving', step: last, stageLabel: 'Сохранение', detail: 'Сохраняем трек в библиотеку…', progress: 0.98 });
+    track.generationSeconds = seconds();
+    this.d.library.write(track);
+    this.set({ phase: 'done', step: last, stageLabel: 'Готово', detail: 'Трек сохранён в библиотеку', progress: 1, trackId: id, etaSec: null, elapsedSec: seconds() });
   }
 }

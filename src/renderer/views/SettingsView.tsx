@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { BackendStatus, LmModelInfo, Settings } from '../../shared/types';
+import type { BackendStatus, LmModelInfo, Settings, VoiceCheck } from '../../shared/types';
 import { Switch, useToast } from '../components/ui';
 import { IcFolder, IcRefresh } from '../icons';
 
@@ -15,6 +15,14 @@ function Row({ label, hint, children }: { label: string; hint?: string; children
 export function SettingsView({ status }: { status: BackendStatus }) {
   const [s, setS] = useState<Settings | null>(null);
   const [models, setModels] = useState<LmModelInfo[]>([]);
+  const [check, setCheck] = useState<VoiceCheck | null>(null);
+  const [checking, setChecking] = useState(false);
+  const runCheck = async () => {
+    setChecking(true);
+    try { setCheck(await window.api.voices.check()); }
+    catch (e) { setCheck({ ok: false, problems: [String((e as Error).message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')], cuda: null }); }
+    finally { setChecking(false); }
+  };
   const [loadingModels, setLoadingModels] = useState(false);
   const toast = useToast();
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -39,7 +47,7 @@ export function SettingsView({ status }: { status: BackendStatus }) {
       void window.api.settings.set(all).then(() => toast('ok', 'Сохранено'));
     }, 500);
   };
-  const pick = async (key: 'aceRuntimePath' | 'libraryPath') => {
+  const pick = async (key: 'aceRuntimePath' | 'libraryPath' | 'seedvcPath' | 'separatorPath' | 'melbandModelsPath' | 'transformersCachePath' | 'voicesPath') => {
     const r = await window.api.settings.pickFolder(s[key]);
     if (r) upd({ [key]: r } as Partial<Settings>);
   };
@@ -107,6 +115,57 @@ export function SettingsView({ status }: { status: BackendStatus }) {
             <select className="select" value={s.audioFormat} onChange={(e) => upd({ audioFormat: e.target.value as Settings['audioFormat'] })}>
               <option value="mp3">MP3</option><option value="wav">WAV</option><option value="flac">FLAC</option>
             </select>
+          </Row>
+        </div>
+
+        <div className="card">
+          <div className="card-title">Голоса · Seed-VC и MelBand-RoFormer</div>
+          <Row label="Папка Seed-VC" hint="Где лежат inference.py и .venv">
+            <div className="row">
+              <input className="input" value={s.seedvcPath} onChange={(e) => upd({ seedvcPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('seedvcPath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Разделение вокала" hint="Папка с .venv\Scripts\melband-roformer-infer.exe">
+            <div className="row">
+              <input className="input" value={s.separatorPath} onChange={(e) => upd({ separatorPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('separatorPath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Модели MelBand-RoFormer" hint="Папка с melband-roformer-kim-vocals">
+            <div className="row">
+              <input className="input" value={s.melbandModelsPath} onChange={(e) => upd({ melbandModelsPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('melbandModelsPath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Кэш Whisper (необязательно)" hint="Пусто — Seed-VC скачает Whisper сам">
+            <div className="row">
+              <input className="input" value={s.transformersCachePath} onChange={(e) => upd({ transformersCachePath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('transformersCachePath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Папка голосов" hint="Здесь хранятся модели голосов">
+            <div className="row">
+              <input className="input" value={s.voicesPath} onChange={(e) => upd({ voicesPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('voicesPath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Качество перепевки" hint={`${s.voiceDiffusionSteps} шагов диффузии · больше — чище, но дольше`}>
+            <input className="range" type="range" min={10} max={60} step={5} value={s.voiceDiffusionSteps}
+              style={{ ['--p' as string]: `${((s.voiceDiffusionSteps - 10) / 50) * 100}%` }} onChange={(e) => upd({ voiceDiffusionSteps: Number(e.target.value) })} />
+          </Row>
+          <Row label="Освобождать видеопамять" hint="Останавливать ACE-Step перед обработкой голоса (если запускало приложение)">
+            <span onClick={() => upd({ freeAceForVoice: !s.freeAceForVoice })} style={{ cursor: 'pointer' }}><Switch on={s.freeAceForVoice} /></span>
+          </Row>
+          <Row label="Проверка" hint="Seed-VC, веса, разделение вокала, видеокарта">
+            <div className="row" style={{ alignItems: 'flex-start' }}>
+              <button className="btn sm" onClick={runCheck} disabled={checking}><IcRefresh size={14} className={checking ? 'spin' : ''} /> Проверить</button>
+              {check && (
+                <div style={{ fontSize: 12.5, color: check.ok ? 'var(--ok)' : 'var(--warn)' }}>
+                  {check.ok ? `Всё на месте${check.python ? ` · Python ${check.python}` : ''}${check.cuda ? ' · CUDA' : ''}` : check.problems.map((p) => <div key={p}>• {p}</div>)}
+                </div>
+              )}
+            </div>
           </Row>
         </div>
 

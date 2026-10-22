@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 dist/
 dist-tests/
 release/
@@ -6,3 +6,6 @@ data/
 Library/
 build/root.json
 *.log
+Voices/
+__pycache__/
+*.pyc

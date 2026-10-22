@@ -1,8 +1,8 @@
 {
   "name": "vega-music-ai",
   "productName": "VEGA-Music-AI",
-  "version": "1.0.0",
-  "description": "VEGA-Music-AI — генератор песен на локальных моделях: текст (LM Studio) и музыка (ACE-Step 1.5)",
+  "version": "2.0.0",
+  "description": "VEGA-Music-AI — генератор песен на локальных моделях: текст (LM Studio), музыка (ACE-Step 1.5) и свои голоса (Seed-VC)",
   "private": true,
   "main": "dist/main.cjs",
   "scripts": {
@@ -11,7 +11,8 @@
     "dev": "node scripts/build.mjs --dev && electron .",
     "dist": "node scripts/build.mjs && electron-builder --win dir",
     "test": "node scripts/test.mjs",
-    "typecheck": "tsc --noEmit -p ."
+    "typecheck": "tsc --noEmit -p .",
+    "test:voice": "python -m unittest discover -s voice/tests -v"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
@@ -39,6 +40,10 @@
       {
         "from": "build/root.json",
         "to": "root.json"
+      },
+      {
+        "from": "voice/vega_voice.py",
+        "to": "voice/vega_voice.py"
       }
     ],
     "win": {

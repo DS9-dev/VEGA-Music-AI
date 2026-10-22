@@ -39,3 +39,7 @@ export const IcUnlock = mk(<><rect x="4" y="11" width="16" height="10" rx="2" />
 export const IcMale = mk(<><circle cx="10" cy="14" r="6" /><path d="M14.3 9.7 21 3M15 3h6v6" /></>);
 export const IcFemale = mk(<><circle cx="12" cy="9" r="6" /><path d="M12 15v7M9 19h6" /></>);
 export const IcLogo = mk(<><path d="M4 14v-4M8 18V6M12 15V9M16 20V4M20 14v-4" /></>);
+export const IcPlus = mk(<path d="M12 5v14M5 12h14" />);
+export const IcUpload = mk(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m17 8-5-5-5 5M12 3v12" /></>);
+export const IcDownload = mk(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5M12 15V3" /></>);
+export const IcEdit = mk(<><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></>);

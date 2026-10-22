@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_PARAMS } from '../shared/catalog';
-import type { BackendStatus, JobState, Track, TrackParams } from '../shared/types';
+import type { BackendStatus, JobState, Track, TrackParams, VoiceItem } from '../shared/types';
 import { GenerationOverlay } from './components/GenerationOverlay';
 import { PlayerBar, usePlayer } from './components/Player';
 import { useToast } from './components/ui';
-import { IcLibrary, IcLogo, IcMinimize, IcSettings, IcSparkles, IcX } from './icons';
+import { IcLibrary, IcLogo, IcMic, IcMinimize, IcSettings, IcSparkles, IcX } from './icons';
 import { CreateView, type Draft } from './views/CreateView';
 import { LibraryView } from './views/LibraryView';
 import { SettingsView } from './views/SettingsView';
+import { VoicesView } from './views/VoicesView';
 
-type View = 'create' | 'library' | 'settings';
+type View = 'create' | 'library' | 'voices' | 'settings';
+const TITLES: Record<View, string> = { create: 'Новый трек', library: 'Библиотека', voices: 'Голоса', settings: 'Настройки' };
 
 function load<T>(key: string, fallback: T): T {
   try { const v = localStorage.getItem(key); return v ? { ...fallback, ...JSON.parse(v) } : fallback; } catch { return fallback; }
@@ -31,6 +33,9 @@ export function App() {
   const player = usePlayer();
   const toast = useToast();
   const jobRef = useRef<JobState | null>(null);
+  const [voices, setVoices] = useState<VoiceItem[]>([]);
+  const refreshVoices = () => { void window.api.voices.list().then(setVoices).catch(() => {}); };
+  useEffect(refreshVoices, []);
 
   useEffect(() => save('mb.params', params), [params]);
   useEffect(() => { const t = setTimeout(() => save('mb.draft', draft), 300); return () => clearTimeout(t); }, [draft]);
@@ -51,10 +56,15 @@ export function App() {
       const prev = jobRef.current;
       jobRef.current = s;
       setJob(s);
-      if (s.phase === 'done' && prev?.phase !== 'done') {
-        setLibKey((k) => k + 1);
-        const list = await window.api.library.list();
-        setLastTrack(list.find((t) => t.id === s.trackId) ?? null);
+      // голос меняет статус — обновляем список на каждом этапе
+      if (s.kind === 'voice' && (s.phase !== prev?.phase || s.step !== prev?.step)) refreshVoices();
+      if ((s.phase === 'done' || s.phase === 'error') && prev?.phase !== s.phase) {
+        refreshVoices();
+        if (s.trackId) {
+          setLibKey((k) => k + 1);
+          const list = await window.api.library.list();
+          setLastTrack(list.find((t) => t.id === s.trackId) ?? null);
+        }
       }
     });
   }, []);
@@ -78,7 +88,13 @@ export function App() {
     toast('ok', 'Настройки и текст загружены');
   };
 
-  const showOverlay = overlay && !!job && job.phase !== 'idle' && view === 'create';
+  const useVoice = (v: VoiceItem) => {
+    setParams({ ...params, voiceId: v.id, voice: v.gender, instrumental: false });
+    setView('create');
+    toast('ok', `Трек будет спет голосом «${v.name}»`);
+  };
+
+  const showOverlay = overlay && !!job && job.phase !== 'idle';
   const mac = window.api.platform === 'darwin';
 
   return (
@@ -90,10 +106,11 @@ export function App() {
         </div>
         <button className={`nav-item ${view === 'create' ? 'active' : ''}`} onClick={() => setView('create')}><IcSparkles size={17} /> Создать</button>
         <button className={`nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}><IcLibrary size={17} /> Библиотека</button>
+        <button className={`nav-item ${view === 'voices' ? 'active' : ''}`} onClick={() => setView('voices')}><IcMic size={17} /> Голоса{voices.length > 0 && <span className="nav-badge">{voices.length}</span>}</button>
         <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}><IcSettings size={17} /> Настройки</button>
 
         {job && job.phase !== 'idle' && !showOverlay && (
-          <button className="mini-job" onClick={() => { setView('create'); setOverlay(true); }}>
+          <button className="mini-job" onClick={() => setOverlay(true)}>
             <ProgressRing value={job.progress} done={job.phase === 'done'} error={job.phase === 'error' || job.phase === 'cancelled'} />
             <div className="mini-job-text">
               <div className="mini-job-title">{job.title}</div>
@@ -123,23 +140,28 @@ export function App() {
               <button className="light max" onClick={() => window.api.win.maximize()} aria-label="Развернуть"><svg width="8" height="8" viewBox="0 0 8 8"><path d="M1 3V1h2M7 5v2H5" stroke="#00400a" strokeWidth="1.6" fill="none" /></svg></button>
             </div>
           )}
-          <div className="titlebar-title">{view === 'create' ? 'Новый трек' : view === 'library' ? 'Библиотека' : 'Настройки'}</div>
+          <div className="titlebar-title">{TITLES[view]}</div>
         </div>
         <div className={`content ${player.track ? 'with-player' : ''}`}>
           {view === 'create' && (
-            <CreateView params={params} setParams={setParams} draft={draft} setDraft={setDraft} status={status} busy={busy} onCreate={create} />
+            <CreateView params={params} setParams={setParams} draft={draft} setDraft={setDraft} status={status} busy={busy} onCreate={create}
+              voices={voices} onOpenVoices={() => setView('voices')} />
           )}
-          {view === 'library' && <LibraryView refreshKey={libKey} onReuse={reuse} onCreate={() => setView('create')} />}
+          {view === 'library' && <LibraryView refreshKey={libKey} onReuse={reuse} onCreate={() => setView('create')} voices={voices} onJobStarted={() => setOverlay(true)} />}
+          {view === 'voices' && <VoicesView voices={voices} refresh={refreshVoices} job={job} onJobStarted={() => { setOverlay(true); refreshVoices(); }}
+            onUse={useVoice} onSettings={() => setView('settings')} />}
           {view === 'settings' && <SettingsView status={status} />}
         </div>
         {showOverlay && job && (
           <GenerationOverlay
             job={job}
-            variantsCount={lastTrack?.variants.length ?? 0}
+            variants={job.kind === 'voice' ? [] : (lastTrack?.variants ?? []).filter((v) => !v.original).map((v, i) => v.label ?? `Вариант ${i + 1}`)}
             onHide={() => setOverlay(false)}
             onCancel={() => void window.api.job.cancel()}
             onClose={closeJob}
             onOpenLibrary={() => { void closeJob(); setView('library'); }}
+            onOpenVoices={() => { void closeJob(); setView('voices'); }}
+            onUseVoice={() => { const v = voices.find((x) => x.id === job.targetId); void closeJob(); if (v) useVoice(v); else setView('voices'); }}
             onPlay={(i) => lastTrack && player.play(lastTrack, i)}
           />
         )}

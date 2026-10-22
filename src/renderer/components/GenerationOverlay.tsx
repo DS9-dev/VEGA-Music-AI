@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtTime } from '../../shared/lyrics';
 import type { JobState } from '../../shared/types';
-import { IcCheck, IcLibrary, IcMinimize, IcPlay, IcRepeat, IcX } from '../icons';
+import { IcCheck, IcLibrary, IcMic, IcMinimize, IcPlay, IcRepeat, IcSparkles, IcX } from '../icons';
 import { Visualizer } from './Visualizer';
 
 const STEPS = ['Подготовка', 'Композиция', 'Синтез', 'Сохранение'];
@@ -44,8 +44,10 @@ export function GenerationOverlay(props: {
   onCancel: () => void;
   onClose: () => void;
   onOpenLibrary: () => void;
+  onOpenVoices: () => void;
+  onUseVoice: () => void;
   onPlay: (variantIndex: number) => void;
-  variantsCount: number;
+  variants: string[]; // подписи вариантов готового трека
 }) {
   const { job } = props;
   const p = useSmooth(job.progress);
@@ -54,6 +56,16 @@ export function GenerationOverlay(props: {
   const failed = job.phase === 'error' || job.phase === 'cancelled';
   const mode = done ? 'done' : failed ? 'error' : 'run';
   const pct = Math.floor(p * 100);
+  const kind = job.kind ?? 'track';
+  const steps = job.steps ?? STEPS;
+  const title = done
+    ? { track: 'Трек готов!', voice: 'Голос готов!', revoice: 'Трек перепет!' }[kind]
+    : failed
+      ? (job.phase === 'cancelled' ? 'Отменено' : 'Не получилось')
+      : { track: `Создаём «${job.title}»`, voice: `Обучаем голос «${job.title}»`, revoice: `Перепеваем «${job.title}»` }[kind];
+  const doneDetail = kind === 'voice' ? job.detail : 'Сохранён в библиотеку';
+  const cancelHint = kind === 'track' ? 'Результат не сохранится. ACE-Step может дорабатывать задачу в фоне ещё немного.'
+    : kind === 'voice' ? 'Если фразы уже нарезаны, голос останется доступным без обучения.' : 'Результат не сохранится.';
 
   return (
     <div className="overlay">
@@ -66,9 +78,9 @@ export function GenerationOverlay(props: {
         </div>
         <div className="gen-body">
           <div className="gen-title">
-            <h2>{done ? 'Трек готов!' : failed ? (job.phase === 'cancelled' ? 'Генерация отменена' : 'Не получилось') : `Создаём «${job.title}»`}</h2>
+            <h2>{title}</h2>
             <div className="gen-stage">{done ? `«${job.title}»` : job.stageLabel}</div>
-            <div className="gen-detail">{failed ? '' : done ? 'Сохранён в библиотеку' : job.detail}</div>
+            <div className="gen-detail">{failed ? '' : done ? doneDetail : job.detail}</div>
           </div>
 
           <div className={`progress ${done ? 'done' : ''} ${failed ? 'error' : ''}`}>
@@ -79,8 +91,8 @@ export function GenerationOverlay(props: {
             <span>{done ? <>Готово за <b>{fmtTime(job.elapsedSec)}</b></> : failed ? '' : eta != null ? <>Осталось примерно <b>{fmtTime(eta)}</b></> : job.phase === 'starting' ? 'Запуск модели…' : 'Почти готово…'}</span>
           </div>
 
-          <div className="steps">
-            {STEPS.map((s, i) => {
+          <div className="steps" style={{ gridTemplateColumns: `repeat(${steps.length}, 1fr)` }}>
+            {steps.map((s, i) => {
               const state = done || i < job.step ? 'done' : i === job.step && !failed ? 'active' : '';
               return (
                 <div key={s} className={`step ${state}`}>
@@ -92,10 +104,10 @@ export function GenerationOverlay(props: {
 
           {failed && job.error && <div className="gen-error">{job.error}</div>}
 
-          {done && (
+          {done && kind !== 'voice' && props.variants.length > 0 && (
             <div className="variants">
-              {Array.from({ length: props.variantsCount }, (_, i) => (
-                <button key={i} className="btn soft" onClick={() => props.onPlay(i)}><IcPlay size={14} /> Вариант {i + 1}</button>
+              {props.variants.map((label, i) => (
+                <button key={i} className="btn soft" onClick={() => props.onPlay(i)}><IcPlay size={14} /> {label}</button>
               ))}
             </div>
           )}
@@ -103,12 +115,17 @@ export function GenerationOverlay(props: {
           <div className="gen-actions">
             {!done && !failed && <>
               <button className="btn" onClick={props.onHide}><IcMinimize size={16} /> Свернуть</button>
-              <button className="btn ghost danger" onClick={props.onCancel} title="Результат не сохранится. ACE-Step может дорабатывать задачу в фоне ещё немного."><IcX size={16} /> Отменить</button>
+              <button className="btn ghost danger" onClick={props.onCancel} title={cancelHint}><IcX size={16} /> Отменить</button>
             </>}
-            {done && <>
+            {done && kind === 'voice' && <>
+              <button className="btn primary" onClick={props.onUseVoice}><IcSparkles size={16} /> Создать трек этим голосом</button>
+              <button className="btn" onClick={props.onOpenVoices}><IcMic size={16} /> К голосам</button>
+            </>}
+            {done && kind !== 'voice' && <>
               <button className="btn primary" onClick={props.onOpenLibrary}><IcLibrary size={16} /> Открыть в библиотеке</button>
-              <button className="btn" onClick={props.onClose}><IcRepeat size={16} /> Создать ещё</button>
+              <button className="btn" onClick={props.onClose}>{kind === 'track' ? <><IcRepeat size={16} /> Создать ещё</> : 'Закрыть'}</button>
             </>}
+            {failed && job.trackId && <button className="btn primary" onClick={props.onOpenLibrary}><IcLibrary size={16} /> Открыть в библиотеке</button>}
             {failed && <button className="btn" onClick={props.onClose}>Закрыть</button>}
           </div>
         </div>

@@ -6,7 +6,10 @@ import { Generator, generateLyrics } from './generation';
 import { Library } from './library';
 import { LmStudio } from './lmstudio';
 import { defaultSettings, SettingsStore } from './settings';
-import type { BackendStatus, Settings, Track, TrackParams } from '../src/shared/types';
+import { applyVoice, VoiceJobs } from './voiceJobs';
+import { VoiceStore } from './voices';
+import { seedvcPython, type WorkerConfig } from './voiceWorker';
+import type { BackendStatus, JobState, NewVoiceSpec, Settings, Track, TrackParams, VoiceModel, VoiceTrainProfile } from '../src/shared/types';
 
 /** Папка проекта: в режиме разработки — исходники, в собранном exe — путь из resources/root.json. */
 function resolveRoot(): string {
@@ -24,6 +27,26 @@ const ace = new AceClient(() => settings.get().aceEndpoint);
 const aceProc = new AceProcess();
 const lm = new LmStudio(() => settings.get().lmEndpoint);
 const library = new Library(() => settings.get().libraryPath);
+const voices = new VoiceStore(() => settings.get().voicesPath);
+
+/** Скрипт обработчика голоса: в собранном exe — из resources, иначе — из папки проекта. */
+function workerConfig(): WorkerConfig {
+  const candidates = [
+    app.isPackaged ? join(process.resourcesPath, 'voice', 'vega_voice.py') : join(app.getAppPath(), 'voice', 'vega_voice.py'),
+    join(appRoot, 'voice', 'vega_voice.py'),
+  ];
+  return { python: seedvcPython(settings.get().seedvcPath), script: candidates.find((c) => existsSync(c)) ?? candidates[0] };
+}
+
+/** Перед работой с голосом: выгрузить модель текста и (по настройке) остановить ACE-Step, если его запускали мы. */
+async function releaseVideoMemory(): Promise<void> {
+  const s = settings.get();
+  await lm.unload(s.lyricsModel).catch(() => false);
+  if (s.freeAceForVoice && aceProc.owned) {
+    aceProc.stop();
+    await sleep(2500);
+  }
+}
 
 let win: BrowserWindow | null = null;
 let aceStarting: Promise<void> | null = null;
@@ -76,24 +99,50 @@ const generator = new Generator({
     const next = Math.min(5, Math.max(0.1, s.calibration[key] * 0.6 + secPerSec * 0.4));
     settings.set({ calibration: { ...s.calibration, [key]: Number(next.toFixed(3)) } });
   },
-  onUpdate: (state) => {
-    win?.webContents.send('job:update', state);
-    if (!win) return;
-    if (['preparing', 'starting', 'generating', 'saving'].includes(state.phase)) win.setProgressBar(Math.max(0.02, state.progress));
-    else win.setProgressBar(-1);
-    if (state.phase === 'done' || state.phase === 'error') {
-      if (!win.isFocused()) {
-        win.flashFrame(true);
-        if (Notification.isSupported()) {
-          new Notification({
-            title: state.phase === 'done' ? 'Трек готов' : 'Ошибка генерации',
-            body: state.phase === 'done' ? state.title : state.error ?? '',
-          }).show();
-        }
-      }
-    }
+  onUpdate: (state) => broadcast(state),
+  voice: {
+    name: (id) => { try { const v = voices.get(id); return voices.usable(v) ? v.name : null; } catch { return null; } },
+    beforeApply: releaseVideoMemory,
+    apply: async (voiceId, input, out, shift, onProgress, signal) => {
+      const r = await applyVoice(workerConfig(), settings.get(), voices, voiceId, input, out, shift, (e) => {
+        if (e.event === 'progress') onProgress(e.value ?? 0, String(e.text ?? ''));
+      }, signal);
+      return r.output;
+    },
   },
 });
+
+const voiceJobs = new VoiceJobs({
+  store: voices,
+  library,
+  settings: () => settings.get(),
+  worker: workerConfig,
+  prepareGpu: releaseVideoMemory,
+  gpuBusy: () => generator.busy,
+  onUpdate: (state) => broadcast(state),
+});
+generator.blocked = () => voiceJobs.busy;
+
+let lastJob: JobState | null = null;
+const RUNNING = ['preparing', 'starting', 'generating', 'saving'];
+
+/** Общий поток состояния заданий (трек или голос) → окно, панель задач, уведомления. */
+function broadcast(state: JobState) {
+  lastJob = state;
+  win?.webContents.send('job:update', state);
+  if (!win) return;
+  if (RUNNING.includes(state.phase)) win.setProgressBar(Math.max(0.02, state.progress));
+  else win.setProgressBar(-1);
+  if ((state.phase === 'done' || state.phase === 'error') && !win.isFocused()) {
+    win.flashFrame(true);
+    if (Notification.isSupported()) {
+      const done = state.kind === 'voice' ? 'Голос готов' : state.kind === 'revoice' ? 'Трек перепет' : 'Трек готов';
+      new Notification({ title: state.phase === 'done' ? done : 'Ошибка', body: state.phase === 'done' ? state.title : state.error ?? '' }).show();
+    }
+  }
+}
+
+function activeJob() { return voiceJobs.busy ? voiceJobs : generator.busy ? generator : lastJob?.kind && lastJob.kind !== 'track' ? voiceJobs : generator; }
 
 async function status(): Promise<BackendStatus> {
   const [aceOk, lmOk] = await Promise.all([ace.isOnline(), lm.isOnline()]);
@@ -147,9 +196,36 @@ ipcMain.handle('lyrics:generate', async (e, p: TrackParams) => {
 ipcMain.handle('lyrics:cancel', () => { lyricsAbort?.abort(); });
 
 ipcMain.handle('job:start', (_e, p: TrackParams, title: string, lyrics: string) => generator.start(p, title, lyrics));
-ipcMain.handle('job:cancel', () => generator.cancel());
-ipcMain.handle('job:reset', () => generator.reset());
-ipcMain.handle('job:get', () => generator.state);
+ipcMain.handle('job:cancel', () => activeJob().cancel());
+ipcMain.handle('job:reset', () => { generator.reset(); voiceJobs.reset(); lastJob = null; });
+ipcMain.handle('job:get', () => activeJob().state);
+
+// ───────────── Голоса (V2) ─────────────
+const AUDIO_FILTER = { name: 'Аудио', extensions: ['mp3', 'wav', 'flac', 'm4a', 'ogg', 'opus', 'aac'] };
+const withUsable = (v: VoiceModel) => ({ ...v, usable: voices.usable(v) });
+ipcMain.handle('voices:list', () => voices.list().map(withUsable));
+ipcMain.handle('voices:pickSources', async () => {
+  const r = await dialog.showOpenDialog(win!, { title: 'Песни или записи голоса', properties: ['openFile', 'multiSelections'], filters: [AUDIO_FILTER] });
+  return r.canceled ? [] : r.filePaths;
+});
+ipcMain.handle('voices:create', (_e, spec: NewVoiceSpec) => voiceJobs.create(spec));
+ipcMain.handle('voices:retrain', (_e, id: string, profile: VoiceTrainProfile) => voiceJobs.retrain(id, profile));
+ipcMain.handle('voices:rename', (_e, id: string, name: string) => withUsable(voices.update(id, { name: name.trim() || voices.get(id).name })));
+ipcMain.handle('voices:remove', async (_e, id: string) => { await shell.trashItem(voices.dir(id)); });
+ipcMain.handle('voices:reveal', (_e, id: string) => shell.showItemInFolder(join(voices.dir(id), 'voice.json')));
+ipcMain.handle('voices:readAudio', (_e, id: string) => readFileSync(join(voices.dir(id), voices.get(id).reference ?? 'reference.wav')));
+ipcMain.handle('voices:export', async (_e, id: string) => {
+  const v = voices.get(id);
+  const r = await dialog.showSaveDialog(win!, { title: 'Сохранить голос', defaultPath: `${v.name}.vegavoice`, filters: [{ name: 'Голос VEGA-Music-AI', extensions: ['vegavoice'] }] });
+  return r.canceled || !r.filePath ? null : voiceJobs.exportVoice(id, r.filePath);
+});
+ipcMain.handle('voices:import', async () => {
+  const r = await dialog.showOpenDialog(win!, { title: 'Открыть голос', properties: ['openFile'], filters: [{ name: 'Голос VEGA-Music-AI', extensions: ['vegavoice'] }] });
+  return r.canceled ? null : withUsable(await voiceJobs.importVoice(r.filePaths[0]));
+});
+ipcMain.handle('voices:check', () => voiceJobs.check());
+ipcMain.handle('voices:revoice', (_e, trackId: string, variant: number, voiceId: string, shift: number | null) => voiceJobs.revoice(trackId, variant, voiceId, shift));
+ipcMain.handle('voices:openRoot', async () => { await shell.openPath(settings.get().voicesPath); });
 
 ipcMain.handle('library:list', () => library.list());
 ipcMain.handle('library:readAudio', (_e, id: string, file: string) => readFileSync(library.filePath(id, file)));

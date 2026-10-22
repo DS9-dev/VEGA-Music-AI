@@ -1,4 +1,4 @@
-import type { BackendStatus, JobState, LmModelInfo, LyricsChunk, LyricsResult, Settings, Track, TrackParams } from './types';
+import type { BackendStatus, JobState, LmModelInfo, LyricsChunk, LyricsResult, NewVoiceSpec, Settings, Track, TrackParams, VoiceCheck, VoiceItem, VoiceTrainProfile } from './types';
 
 /** API, которое preload выставляет в window.api. */
 export interface MusicApi {
@@ -30,6 +30,21 @@ export interface MusicApi {
     update(id: string, patch: Partial<Track>): Promise<Track>;
     remove(id: string): Promise<void>;
     reveal(id: string, file?: string): Promise<void>;
+    openRoot(): Promise<void>;
+  };
+  voices: {
+    list(): Promise<VoiceItem[]>;
+    pickSources(): Promise<string[]>;
+    create(spec: NewVoiceSpec): Promise<string>;
+    retrain(id: string, profile: VoiceTrainProfile): Promise<void>;
+    rename(id: string, name: string): Promise<VoiceItem>;
+    remove(id: string): Promise<void>;
+    reveal(id: string): Promise<void>;
+    readAudio(id: string): Promise<ArrayBuffer>;
+    exportVoice(id: string): Promise<string | null>;
+    importVoice(): Promise<VoiceItem | null>;
+    check(): Promise<VoiceCheck>;
+    revoice(trackId: string, variant: number, voiceId: string, shift: number | null): Promise<string>;
     openRoot(): Promise<void>;
   };
   win: { minimize(): void; maximize(): void; close(): void };

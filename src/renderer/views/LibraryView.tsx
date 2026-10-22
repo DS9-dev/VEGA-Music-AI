@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import { fmtTime } from '../../shared/lyrics';
-import type { Track } from '../../shared/types';
+import type { Track, VoiceItem } from '../../shared/types';
 import { usePlayer } from '../components/Player';
 import { Cover, useToast } from '../components/ui';
-import { IcFolder, IcLibrary, IcPause, IcPlay, IcRepeat, IcSearch, IcSparkles, IcStar, IcStarFill, IcText, IcTrash } from '../icons';
+import { RevoiceDialog } from '../components/VoiceDialogs';
+import { IcFolder, IcLibrary, IcMic, IcPause, IcPlay, IcRepeat, IcSearch, IcSparkles, IcStar, IcStarFill, IcText, IcTrash } from '../icons';
 
-export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => void; onCreate: () => void }) {
+export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => void; onCreate: () => void; voices: VoiceItem[]; onJobStarted: () => void }) {
   const [tracks, setTracks] = useState<Track[] | null>(null);
   const [q, setQ] = useState('');
   const [openLyrics, setOpenLyrics] = useState<string | null>(null);
   const [confirmDel, setConfirmDel] = useState<string | null>(null);
+  const [revoice, setRevoice] = useState<Track | null>(null);
   const player = usePlayer();
   const toast = useToast();
 
@@ -68,13 +70,14 @@ export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => 
                 <div className="track-title">{t.title}</div>
                 <div className="track-meta">
                   {new Date(t.createdAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                  {' · '}{fmtTime(t.params.duration)} · {t.bpm} BPM · {t.params.instrumental ? 'инструментал' : t.params.voice === 'male' ? 'мужской вокал' : 'женский вокал'}
+                  {' · '}{fmtTime(t.params.duration)} · {t.bpm} BPM · {t.params.instrumental ? 'инструментал' : t.voiceName ? `голос «${t.voiceName}»` : t.params.voice === 'male' ? 'мужской вокал' : 'женский вокал'}
                   {t.generationSeconds ? ` · создан за ${fmtTime(t.generationSeconds)}` : ''}
                 </div>
                 <div className="track-tags">
                   {t.params.genres.map((g) => <span key={g} className="tag">{g}</span>)}
                   {t.params.moods.map((g) => <span key={g} className="tag">{g}</span>)}
                   {t.params.matureDark && <span className="tag dark">Mature Dark</span>}
+                  {t.voiceName && <span className="tag voice"><IcMic size={11} /> {t.voiceName}</span>}
                 </div>
               </div>
               <div className="track-side">
@@ -82,11 +85,11 @@ export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => 
                   {t.variants.map((v, i) => {
                     const on = playingThis && player.variant === i;
                     return (
-                      <span key={v.file} className={`vbtn ${on ? 'on' : ''}`}>
+                      <span key={v.file} className={`vbtn ${on ? 'on' : ''} ${v.original ? 'orig' : ''}`} title={v.original ? 'Исходный вокал ACE-Step до перепевки' : undefined}>
                         <button className="pi" style={{ border: 0 }} onClick={() => (on ? player.toggle() : player.play(t, i))}>
                           {on && player.playing ? <IcPause size={11} /> : <IcPlay size={11} />}
                         </button>
-                        <span onClick={() => (on ? player.toggle() : player.play(t, i))} style={{ cursor: 'pointer' }}>Вариант {i + 1}</span>
+                        <span onClick={() => (on ? player.toggle() : player.play(t, i))} style={{ cursor: 'pointer' }}>{v.label ?? `Вариант ${i + 1}`}</span>
                         <span className={`star ${v.favorite ? 'on' : ''}`} role="button" title="Лучший" onClick={() => toggleFav(t, i)}>
                           {v.favorite ? <IcStarFill size={14} /> : <IcStar size={14} />}
                         </span>
@@ -96,6 +99,7 @@ export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => 
                 </div>
                 <div className="track-actions">
                   <button className="btn sm ghost" title="Создать заново с этими настройками и текстом" onClick={() => props.onReuse(t)}><IcRepeat size={15} /> Повторить</button>
+                  {!t.params.instrumental && <button className="btn sm ghost" title="Перепеть этот трек своим голосом" disabled={!props.voices.some((v) => v.usable)} onClick={() => setRevoice(t)}><IcMic size={15} /> Перепеть</button>}
                   <button className={`btn sm icon ghost ${openLyrics === t.id ? 'soft' : ''}`} title="Текст" onClick={() => setOpenLyrics(openLyrics === t.id ? null : t.id)}><IcText size={15} /></button>
                   <button className="btn sm icon ghost" title="Показать в папке" onClick={() => window.api.library.reveal(t.id, t.variants[0]?.file)}><IcFolder size={15} /></button>
                   <button className={`btn sm ${confirmDel === t.id ? 'danger' : 'icon ghost'}`} title="Удалить в корзину" onClick={() => remove(t)}>
@@ -113,6 +117,7 @@ export function LibraryView(props: { refreshKey: number; onReuse: (t: Track) => 
           );
         })}
       </div>
+      {revoice && <RevoiceDialog track={revoice} voices={props.voices} onClose={() => setRevoice(null)} onStarted={() => { setRevoice(null); props.onJobStarted(); }} />}
     </>
   );
 }

@@ -154,4 +154,6 @@ export const DEFAULT_PARAMS: TrackParams = {
   seed: 42,
   sound: '',
   allowBacking: false,
+  voiceId: null,
+  voiceShift: null,
 };

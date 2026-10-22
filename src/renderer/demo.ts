@@ -2,7 +2,7 @@
 import type { MusicApi } from '../shared/api';
 import { buildCaption } from '../shared/caption';
 import { assembleLyrics, parseLlmLyrics, planStructure } from '../shared/lyrics';
-import type { JobState, LyricsChunk, Settings, Track, TrackParams } from '../shared/types';
+import type { JobState, LyricsChunk, Settings, Track, TrackParams, VoiceItem } from '../shared/types';
 
 const SONG: Record<string, string[]> = {
   V1: ['Дождь стучит по крышам до утра', 'Город в неоне не знает сна', 'Фары режут мокрую тьму', 'Я лечу навстречу ему',
@@ -54,10 +54,13 @@ export function installDemoApi() {
     aceModel: 'acestep-v15-turbo', aceLmModel: 'acestep-5Hz-lm-1.7B', aceInferenceSteps: 8, aceLmTemperature: 0.85, audioFormat: 'mp3',
     lmEndpoint: 'http://127.0.0.1:1234', lyricsModel: 'qwen/qwen3-14b', lyricsTemperature: 0.8, unloadLyricsModel: true,
     libraryPath: 'D:\\VEGA-Music-AI\\Library', calibration: { '1': 0.55, '2': 0.72, overhead: 12 },
+    seedvcPath: 'D:\\AI\\Seed-VC', separatorPath: 'D:\\AI\\StemSeparator', melbandModelsPath: 'D:\\AI\\StemSeparator\\models',
+    transformersCachePath: '', voicesPath: 'D:\\VEGA-Music-AI\\Voices', voiceDiffusionSteps: 30, freeAceForVoice: true,
   };
   const base: TrackParams = {
     theme: 'Ночной курьер мчится сквозь неоновый город под ливнем, чтобы успеть до рассвета', genres: ['Рок', 'Синтвейв'], moods: ['Энергичное'], instrumental: false, matureDark: false,
     voice: 'male', timbre: 'baritone', language: 'ru', duration: 220, bpm: null, key: null, density: 'normal', variants: 2, seedLocked: false, seed: 42, sound: '', allowBacking: false,
+    voiceId: null, voiceShift: null,
   };
   const H = 3600e3;
   const tracks: Track[] = [
@@ -67,6 +70,20 @@ export function installDemoApi() {
     { id: 'demo4', title: 'Steel Horizon', createdAt: new Date(Date.now() - 75 * H).toISOString(), params: { ...base, genres: ['Оркестр', 'Саундтрек'], instrumental: true, moods: ['Эпичное'], duration: 150 }, lyrics: '[Instrumental]', caption: '', bpm: 95, variants: [{ file: 'variant-1.mp3' }], generationSeconds: 98 },
     { id: 'demo5', title: 'Бит на рассвете', createdAt: new Date(Date.now() - 120 * H).toISOString(), params: { ...base, genres: ['Хип-хоп', 'Лоу-фай'], moods: ['Спокойное'], timbre: 'rap', duration: 200 }, lyrics: '', caption: '', bpm: 90, variants: [{ file: 'variant-1.mp3' }, { file: 'variant-2.mp3' }], generationSeconds: 140 },
   ];
+
+  const D = 86400e3;
+  const voices: VoiceItem[] = [
+    { id: 'my', name: 'Мой голос', gender: 'male', createdAt: new Date(Date.now() - 3 * D).toISOString(), updatedAt: '', status: 'ready', profile: 'standard',
+      sources: [], dataset: { segments: 84, seconds: 372, warnings: [] }, reference: 'reference.wav', f0Median: 146, note: 'D3',
+      training: { steps: 800, seconds: 640, finalLoss: 0.18 }, checkpoint: 'model/ft_model.pth', config: 'model/config.yml', consent: true, usable: true },
+    { id: 'alice', name: 'Алиса', gender: 'female', createdAt: new Date(Date.now() - 6 * D).toISOString(), updatedAt: '', status: 'ready', profile: 'zero',
+      sources: [], dataset: { segments: 22, seconds: 98, warnings: ['Данных немного. Для лучшего сходства добавьте 2–4 песни (желательно 5+ минут вокала).'] },
+      reference: 'reference.wav', f0Median: 262, note: 'C4', consent: true, usable: true },
+  ];
+  tracks.splice(1, 0, { id: 'demoV', title: 'Огни после полуночи · Мой голос', createdAt: new Date(Date.now() - 1.5 * H).toISOString(),
+    params: { ...base, voiceId: 'my' }, lyrics: demoText(base).full, caption: buildCaption(base), bpm: 105, voiceName: 'Мой голос',
+    variants: [{ file: 'variant-1.mp3', label: 'Вариант 1', favorite: true }, { file: 'variant-2.mp3', label: 'Вариант 2' }, { file: 'variant-1-ace.mp3', label: 'Вариант 1 · ACE', original: true }, { file: 'variant-2-ace.mp3', label: 'Вариант 2 · ACE', original: true }],
+    generationSeconds: 236 });
 
   const emit = (s: Partial<JobState>) => { job = { ...job, ...s }; jobSubs.forEach((f) => f(job)); };
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -102,7 +119,9 @@ export function installDemoApi() {
     job: {
       start: async (p, title) => {
         cancelled = false;
-        job = { id: 'demo', phase: 'preparing', title, progress: 0.01, step: 0, stageLabel: 'Подготовка', detail: 'Освобождаем видеопамять…', elapsedSec: 0, etaSec: null };
+        const withVoice = !!p.voiceId && !p.instrumental;
+        const vname = voices.find((v) => v.id === p.voiceId)?.name;
+        job = { id: 'demo', kind: 'track', steps: withVoice ? ['Подготовка', 'Композиция', 'Синтез', 'Голос', 'Сохранение'] : undefined, phase: 'preparing', title, progress: 0.01, step: 0, stageLabel: 'Подготовка', detail: 'Освобождаем видеопамять…', elapsedSec: 0, etaSec: null };
         emit({});
         void (async () => {
           const total = 30 / speed;
@@ -110,15 +129,18 @@ export function installDemoApi() {
           for (let t = 0; t <= total; t += 0.5) {
             if (cancelled) { emit({ phase: 'cancelled', stageLabel: 'Отменено' }); return; }
             const g = t / total;
-            emit({ phase: 'generating', step: g < 0.42 ? 1 : 2, stageLabel: g < 0.42 ? 'Композиция' : g > 0.9 ? 'Финальная обработка' : 'Синтез звука',
+            if (withVoice && g > 0.65) {
+              emit({ phase: 'generating', step: 3, stageLabel: 'Голос', detail: g < 0.75 ? 'Отделяем вокал от музыки · вариант 1 из 2' : 'Перепеваем вокал выбранным голосом · вариант 1 из 2', progress: 0.04 + 0.92 * g, elapsedSec: t * speed, etaSec: Math.round((total - t) * speed) });
+            } else emit({ phase: 'generating', step: g < 0.42 ? 1 : 2, stageLabel: g < 0.42 ? 'Композиция' : g > 0.9 ? 'Финальная обработка' : 'Синтез звука',
               detail: g < 0.42 ? 'Сочиняем мелодию и аранжировку' : 'Синтезируем инструменты и вокал', progress: 0.04 + 0.92 * g, elapsedSec: t * speed, etaSec: Math.round((total - t) * speed) });
             await sleep(500);
           }
-          emit({ phase: 'saving', step: 3, stageLabel: 'Сохранение', detail: 'Сохраняем трек…', progress: 0.98 });
+          emit({ phase: 'saving', step: withVoice ? 4 : 3, stageLabel: 'Сохранение', detail: 'Сохраняем трек…', progress: 0.98 });
           await sleep(800);
-          const t: Track = { id: 'demo' + Date.now(), title, createdAt: new Date().toISOString(), params: p, lyrics: p.instrumental ? '[Instrumental]' : demoText(p).full, caption: buildCaption(p), bpm: 120, variants: Array.from({ length: p.variants }, (_, i) => ({ file: `variant-${i + 1}.wav` })), generationSeconds: 32 };
+          const t: Track = { id: 'demo' + Date.now(), title, createdAt: new Date().toISOString(), params: p, lyrics: p.instrumental ? '[Instrumental]' : demoText(p).full, caption: buildCaption(p), bpm: 120, variants: Array.from({ length: p.variants }, (_, i) => ({ file: `variant-${i + 1}.wav`, label: `Вариант ${i + 1}` })), generationSeconds: 32, voiceName: withVoice ? vname : undefined };
+          if (withVoice) t.variants.push(...t.variants.map((v, i) => ({ file: `variant-${i + 1}-ace.wav`, label: `Вариант ${i + 1} · ACE`, original: true })));
           tracks.unshift(t);
-          emit({ phase: 'done', step: 3, stageLabel: 'Готово', progress: 1, trackId: t.id, etaSec: null, elapsedSec: 32 });
+          emit({ phase: 'done', step: withVoice ? 4 : 3, stageLabel: 'Готово', progress: 1, trackId: t.id, etaSec: null, elapsedSec: 32 });
         })();
         return 'demo';
       },
@@ -135,7 +157,74 @@ export function installDemoApi() {
       reveal: async () => {},
       openRoot: async () => {},
     },
+    voices: {
+      list: async () => voices.map((v) => ({ ...v })),
+      pickSources: async () => ['D:\\Music\\Моя песня 1.mp3', 'D:\\Music\\Моя песня 2.mp3', 'D:\\Music\\Акапелла.wav'],
+      create: async (spec) => {
+        const id = 'v' + Date.now();
+        voices.unshift({ id, name: spec.name, gender: spec.gender, createdAt: new Date().toISOString(), updatedAt: '', status: 'preparing', profile: spec.profile, sources: [], consent: true, usable: false });
+        runVoiceJob(id, spec.name, spec.profile !== 'zero');
+        return id;
+      },
+      retrain: async (id) => { const v = voices.find((x) => x.id === id)!; v.status = 'training'; runVoiceJob(id, v.name, true, true); },
+      rename: async (id, name) => { const v = voices.find((x) => x.id === id)!; v.name = name; return v; },
+      remove: async (id) => { const i = voices.findIndex((x) => x.id === id); if (i >= 0) voices.splice(i, 1); },
+      reveal: async () => {},
+      readAudio: async () => synthWav(),
+      exportVoice: async (id) => `D:\\${voices.find((x) => x.id === id)?.name}.vegavoice`,
+      importVoice: async () => null,
+      check: async () => ({ ok: true, problems: [], cuda: true, python: '3.10.11' }),
+      revoice: async (trackId, variant, voiceId) => {
+        const t = tracks.find((x) => x.id === trackId)!;
+        const v = voices.find((x) => x.id === voiceId)!;
+        const title = `${t.title} · ${v.name}`;
+        void simulate('revoice', title, ['Разделение', 'Голос', 'Сведение'], [[0, 'Разделение', 'Отделяем вокал от музыки'], [1, 'Голос', 'Перепеваем вокал выбранным голосом'], [2, 'Сведение', 'Сводим вокал с музыкой']], 12, () => {
+          const nt: Track = { ...t, id: 'rv' + Date.now(), title, createdAt: new Date().toISOString(), voiceName: v.name, variants: [{ file: 'variant-1.mp3', label: v.name }] };
+          tracks.unshift(nt);
+          return { trackId: nt.id, detail: 'Трек сохранён в библиотеку' };
+        });
+        void variant;
+        return 'demo';
+      },
+      openRoot: async () => {},
+    },
     win: { minimize() {}, maximize() {}, close() {} },
   };
+
+  async function simulate(kind: JobState['kind'], title: string, steps: string[], stages: [number, string, string][], seconds: number,
+    finish: () => Partial<JobState>, targetId?: string, onStage?: (i: number) => void) {
+    cancelled = false;
+    job = { id: 'demo-' + kind, kind, steps, targetId, phase: 'preparing', title, progress: 0.01, step: 0, stageLabel: steps[0], detail: 'Освобождаем видеопамять…', elapsedSec: 0, etaSec: null };
+    emit({});
+    const total = seconds / speed;
+    await sleep(800 / speed);
+    for (let t = 0; t <= total; t += 0.5) {
+      if (cancelled) { emit({ phase: 'cancelled', stageLabel: 'Отменено' }); return; }
+      const g = t / total;
+      const si = Math.min(stages.length - 1, Math.floor(g * stages.length));
+      const [step, label, detail] = stages[si];
+      onStage?.(si);
+      const extra = kind === 'voice' && label === 'Обучение' ? ` · Шаг ${Math.round(((g * stages.length - si)) * 800)} из 800 · ошибка ${(0.6 - g * 0.4).toFixed(3)}` : '';
+      emit({ phase: 'generating', step, stageLabel: label, detail: detail + extra, progress: 0.03 + 0.94 * g, elapsedSec: t * speed, etaSec: Math.round((total - t) * speed) });
+      await sleep(500);
+    }
+    emit({ phase: 'done', step: steps.length - 1, stageLabel: 'Готово', progress: 1, etaSec: null, ...finish() });
+  }
+
+  function runVoiceJob(id: string, name: string, train: boolean, retrainOnly = false) {
+    const steps = train ? ['Вокал', 'Нарезка', 'Обучение', 'Готово'] : ['Вокал', 'Нарезка', 'Готово'];
+    const stages: [number, string, string][] = retrainOnly ? [[2, 'Обучение', 'Обучаем модель голоса']]
+      : [[0, 'Выделение вокала', 'Выделяем вокал: Моя песня 1.mp3'], [0, 'Выделение вокала', 'Выделяем вокал: Моя песня 2.mp3'], [1, 'Нарезка фраз', 'Нарезаем фразы'],
+        ...(train ? [[2, 'Обучение', 'Обучаем модель голоса'], [2, 'Обучение', 'Обучаем модель голоса'], [2, 'Обучение', 'Обучаем модель голоса']] as [number, string, string][] : [])];
+    void simulate('voice', name, steps, stages, train ? 36 : 14, () => {
+      const v = voices.find((x) => x.id === id)!;
+      Object.assign(v, { status: 'ready', usable: true, reference: 'reference.wav', f0Median: 150, note: 'D3', dataset: { segments: 61, seconds: 284, warnings: [] },
+        ...(train ? { checkpoint: 'model/ft_model.pth', config: 'model/config.yml', training: { steps: 800, seconds: 610, finalLoss: 0.21 } } : {}) });
+      return { detail: `284 с вокала · 61 фраза${train ? ' · 800 шагов обучения' : ''}` };
+    }, id, (i) => {
+      const v = voices.find((x) => x.id === id);
+      if (v && train && stages[i][0] === 2) v.status = 'training';
+    });
+  }
   (window as unknown as { api: MusicApi }).api = api;
 }

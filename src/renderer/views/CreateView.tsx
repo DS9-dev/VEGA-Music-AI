@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { GENRES, KEYS, LANGUAGES, MOODS, TIMBRES, resolveBpm } from '../../shared/catalog';
 import { analyzeLyrics, fmtTime, planStructure, sanitizeLyrics } from '../../shared/lyrics';
-import type { BackendStatus, Density, TrackParams } from '../../shared/types';
+import type { BackendStatus, Density, TrackParams, VoiceItem } from '../../shared/types';
 import { ChipPicker, Range, Segmented, ToggleRow, useToast } from '../components/ui';
 import { LyricsEditor } from '../components/LyricsEditor';
-import { IcChevron, IcDice, IcFemale, IcLock, IcMale, IcPiano, IcSkull, IcSparkles, IcStop, IcTrash, IcUnlock, IcWand } from '../icons';
+import { ShiftPicker } from '../components/VoiceDialogs';
+import { IcChevron, IcDice, IcFemale, IcLock, IcMale, IcMic, IcPiano, IcSkull, IcSparkles, IcStop, IcTrash, IcUnlock, IcWand } from '../icons';
 
 const SECTION_RU: Record<string, string> = {
   Intro: 'Интро', 'Verse 1': 'Куплет 1', 'Verse 2': 'Куплет 2', 'Verse 3': 'Куплет 3', 'Pre-Chorus': 'Распевка',
@@ -21,6 +22,8 @@ export function CreateView(props: {
   status: BackendStatus;
   busy: boolean;
   onCreate: () => void;
+  voices: VoiceItem[];
+  onOpenVoices: () => void;
 }) {
   const { params: p, setParams, draft, setDraft } = props;
   const toast = useToast();
@@ -59,8 +62,9 @@ export function CreateView(props: {
   };
 
   const bpm = resolveBpm(p);
+  const voice = p.voiceId ? props.voices.find((v) => v.id === p.voiceId && v.usable) : undefined;
   const timbres = TIMBRES[p.voice];
-  const canCreate = !props.busy && !streaming && (p.instrumental || draft.text.trim().length > 0) && p.genres.length > 0;
+  const canCreate = !props.busy && !streaming && (p.instrumental || draft.text.trim().length > 0) && p.genres.length > 0 && !(p.voiceId && !voice && !p.instrumental);
   const genreLabels = GENRES.map((g) => g.label);
   const tooShort = !streaming && !p.instrumental && draft.text.trim() && analysis.estimatedSec < p.duration * 0.8;
 
@@ -90,7 +94,31 @@ export function CreateView(props: {
 
         {!p.instrumental && (
           <div className="card">
-            <div className="card-title">Голос</div>
+            <div className="card-title">Голос{props.voices.length === 0 && <span className="hint"><button className="link-btn" onClick={props.onOpenVoices}>Создать свой голос →</button></span>}</div>
+            {props.voices.length > 0 && (
+              <div className="field" style={{ marginBottom: 12 }}>
+                <div className="label"><IcMic size={14} /> Исполнитель</div>
+                <select className="select" value={p.voiceId ?? ''} onChange={(e) => {
+                  const v = props.voices.find((x) => x.id === e.target.value);
+                  setParams({ ...p, voiceId: v ? v.id : null, voice: v ? v.gender : p.voice });
+                }}>
+                  <option value="">Голос ACE-Step (стандартный)</option>
+                  {props.voices.map((v) => (
+                    <option key={v.id} value={v.id} disabled={!v.usable}>
+                      {v.name}{v.usable ? (v.checkpoint ? ' · обучен' : ' · без обучения') : v.status === 'error' ? ' · ошибка' : ' · ещё обучается'}
+                    </option>
+                  ))}
+                </select>
+                {voice && <div className="plan-line">ACE-Step споёт мелодию {voice.gender === 'female' ? 'женским' : 'мужским'} голосом, затем вокал будет перепет голосом «{voice.name}». Займёт на 1–3 минуты дольше.</div>}
+                {p.voiceId && !voice && <div className="plan-line" style={{ color: 'var(--warn)' }}>Выбранный голос недоступен — выберите другой.</div>}
+              </div>
+            )}
+            {voice && (
+              <div className="field" style={{ marginBottom: 12 }}>
+                <div className="label">Тон голоса</div>
+                <ShiftPicker compact value={p.voiceShift} onChange={(v) => set('voiceShift', v)} />
+              </div>
+            )}
             <Segmented value={p.voice} onChange={(v) => setParams({ ...p, voice: v, timbre: 'auto' })} options={[
               { value: 'male', label: <><IcMale size={15} /> Мужской</> },
               { value: 'female', label: <><IcFemale size={15} /> Женский</> },
@@ -211,7 +239,7 @@ export function CreateView(props: {
           <div className="summary">
             <div className="summary-main">{draft.title || 'Без названия'}</div>
             <div className="summary-sub">
-              {[p.genres.join(', ') || 'жанр не выбран', p.instrumental ? 'инструментал' : `${p.voice === 'male' ? 'мужской' : 'женский'} вокал`, fmtTime(p.duration), `${bpm} BPM`, p.matureDark ? 'Mature Dark' : '']
+              {[p.genres.join(', ') || 'жанр не выбран', p.instrumental ? 'инструментал' : voice ? `голос «${voice.name}»` : `${p.voice === 'male' ? 'мужской' : 'женский'} вокал`, fmtTime(p.duration), `${bpm} BPM`, p.matureDark ? 'Mature Dark' : '']
                 .filter(Boolean).join(' · ')}
             </div>
           </div>
