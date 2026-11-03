@@ -98,8 +98,9 @@ export const LANGUAGES: LangDef[] = [
   { code: 'zh', label: '中文', en: 'Chinese' },
 ];
 
-export const KEYS = ['C major', 'C minor', 'D major', 'D minor', 'E major', 'E minor', 'F major', 'F minor',
-  'G major', 'G minor', 'A major', 'A minor', 'B major', 'B minor'];
+export const KEYS = ['C major', 'C minor', 'C# major', 'C# minor', 'D major', 'D minor', 'D# major', 'D# minor', 'E major', 'E minor',
+  'F major', 'F minor', 'F# major', 'F# minor', 'G major', 'G minor', 'G# major', 'G# minor', 'A major', 'A minor',
+  'A# major', 'A# minor', 'B major', 'B minor'];
 
 export function findGenre(label: string): GenreDef | undefined {
   const l = label.trim().toLowerCase();
@@ -156,4 +157,7 @@ export const DEFAULT_PARAMS: TrackParams = {
   allowBacking: false,
   voiceId: null,
   voiceShift: null,
+  sourceSongId: null,
+  cover: false,
+  coverStrength: 0.5,
 };

@@ -8,8 +8,12 @@ import { LmStudio } from './lmstudio';
 import { defaultSettings, SettingsStore } from './settings';
 import { applyVoice, VoiceJobs } from './voiceJobs';
 import { VoiceStore } from './voices';
+import { SongStore } from './songs';
+import { rewriteSong, SongJobs } from './songJobs';
 import { seedvcPython, type WorkerConfig } from './voiceWorker';
-import type { BackendStatus, JobState, NewVoiceSpec, Settings, Track, TrackParams, VoiceModel, VoiceTrainProfile } from '../src/shared/types';
+import type {
+  BackendStatus, JobState, NewVoiceSpec, RemakeSpec, RewriteSpec, Settings, Song, SongImportSpec, Track, TrackParams, VoiceModel, VoiceTrainProfile,
+} from '../src/shared/types';
 
 /** Папка проекта: в режиме разработки — исходники, в собранном exe — путь из resources/root.json. */
 function resolveRoot(): string {
@@ -28,6 +32,7 @@ const aceProc = new AceProcess();
 const lm = new LmStudio(() => settings.get().lmEndpoint);
 const library = new Library(() => settings.get().libraryPath);
 const voices = new VoiceStore(() => settings.get().voicesPath);
+const songs = new SongStore(() => settings.get().songsPath);
 
 /** Скрипт обработчика голоса: в собранном exe — из resources, иначе — из папки проекта. */
 function workerConfig(): WorkerConfig {
@@ -51,6 +56,7 @@ async function releaseVideoMemory(): Promise<void> {
 let win: BrowserWindow | null = null;
 let aceStarting: Promise<void> | null = null;
 let lyricsAbort: AbortController | null = null;
+let rewriteAbort: AbortController | null = null;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -100,6 +106,7 @@ const generator = new Generator({
     settings.set({ calibration: { ...s.calibration, [key]: Number(next.toFixed(3)) } });
   },
   onUpdate: (state) => broadcast(state),
+  songSource: (id) => songs.sourcePath(id),
   voice: {
     name: (id) => { try { const v = voices.get(id); return voices.usable(v) ? v.name : null; } catch { return null; } },
     beforeApply: releaseVideoMemory,
@@ -112,16 +119,31 @@ const generator = new Generator({
   },
 });
 
-const voiceJobs = new VoiceJobs({
+const voiceJobs: VoiceJobs = new VoiceJobs({
   store: voices,
   library,
   settings: () => settings.get(),
   worker: workerConfig,
   prepareGpu: releaseVideoMemory,
-  gpuBusy: () => generator.busy,
+  gpuBusy: () => generator.busy || songJobs.busy,
   onUpdate: (state) => broadcast(state),
 });
-generator.blocked = () => voiceJobs.busy;
+
+const songJobs: SongJobs = new SongJobs({
+  store: songs,
+  library,
+  voices,
+  lm,
+  ace,
+  settings: () => settings.get(),
+  worker: workerConfig,
+  ensureAce,
+  prepareGpu: releaseVideoMemory,
+  unloadLlm: async () => { await lm.unload(settings.get().lyricsModel); },
+  gpuBusy: () => generator.busy || voiceJobs.busy,
+  onUpdate: (state) => broadcast(state),
+});
+generator.blocked = () => voiceJobs.busy || songJobs.busy;
 
 let lastJob: JobState | null = null;
 const RUNNING = ['preparing', 'starting', 'generating', 'saving'];
@@ -136,13 +158,19 @@ function broadcast(state: JobState) {
   if ((state.phase === 'done' || state.phase === 'error') && !win.isFocused()) {
     win.flashFrame(true);
     if (Notification.isSupported()) {
-      const done = state.kind === 'voice' ? 'Голос готов' : state.kind === 'revoice' ? 'Трек перепет' : 'Трек готов';
+      const done = state.kind === 'voice' ? 'Голос готов' : state.kind === 'revoice' ? 'Трек перепет' : state.kind === 'song' ? 'Песня разобрана' : 'Трек готов';
       new Notification({ title: state.phase === 'done' ? done : 'Ошибка', body: state.phase === 'done' ? state.title : state.error ?? '' }).show();
     }
   }
 }
 
-function activeJob() { return voiceJobs.busy ? voiceJobs : generator.busy ? generator : lastJob?.kind && lastJob.kind !== 'track' ? voiceJobs : generator; }
+function activeJob() {
+  if (voiceJobs.busy) return voiceJobs;
+  if (songJobs.busy) return songJobs;
+  if (generator.busy) return generator;
+  const k = lastJob?.kind;
+  return k === 'song' || k === 'remake' ? songJobs : k && k !== 'track' ? voiceJobs : generator;
+}
 
 async function status(): Promise<BackendStatus> {
   const [aceOk, lmOk] = await Promise.all([ace.isOnline(), lm.isOnline()]);
@@ -197,7 +225,7 @@ ipcMain.handle('lyrics:cancel', () => { lyricsAbort?.abort(); });
 
 ipcMain.handle('job:start', (_e, p: TrackParams, title: string, lyrics: string) => generator.start(p, title, lyrics));
 ipcMain.handle('job:cancel', () => activeJob().cancel());
-ipcMain.handle('job:reset', () => { generator.reset(); voiceJobs.reset(); lastJob = null; });
+ipcMain.handle('job:reset', () => { generator.reset(); voiceJobs.reset(); songJobs.reset(); lastJob = null; });
 ipcMain.handle('job:get', () => activeJob().state);
 
 // ───────────── Голоса (V2) ─────────────
@@ -226,6 +254,52 @@ ipcMain.handle('voices:import', async () => {
 ipcMain.handle('voices:check', () => voiceJobs.check());
 ipcMain.handle('voices:revoice', (_e, trackId: string, variant: number, voiceId: string, shift: number | null) => voiceJobs.revoice(trackId, variant, voiceId, shift));
 ipcMain.handle('voices:openRoot', async () => { await shell.openPath(settings.get().voicesPath); });
+
+// ───────────── Песни (V3) ─────────────
+const songItem = (x: Song) => songs.item(x);
+ipcMain.handle('songs:list', () => songs.list().map(songItem));
+ipcMain.handle('songs:pick', async () => {
+  const r = await dialog.showOpenDialog(win!, { title: 'Песня', properties: ['openFile'], filters: [AUDIO_FILTER] });
+  return r.canceled ? null : r.filePaths[0];
+});
+ipcMain.handle('songs:import', (_e, spec: SongImportSpec) => songJobs.importSong(spec));
+ipcMain.handle('songs:update', (_e, id: string, patch: Partial<Song>) => {
+  const allowed: Partial<Song> = {};
+  if (typeof patch.title === 'string') allowed.title = patch.title.trim() || songs.get(id).title;
+  if (typeof patch.lyrics === 'string') allowed.lyrics = patch.lyrics;
+  if ('rewrite' in patch) allowed.rewrite = patch.rewrite ?? undefined;
+  return songItem(songs.update(id, allowed));
+});
+ipcMain.handle('songs:remove', async (_e, id: string) => { await shell.trashItem(songs.dir(id)); });
+ipcMain.handle('songs:reveal', (_e, id: string) => shell.showItemInFolder(join(songs.dir(id), 'song.json')));
+ipcMain.handle('songs:readAudio', (_e, id: string, which: 'source' | 'vocals' | 'instrumental') => {
+  const x = songs.get(id);
+  const f = which === 'vocals' ? x.vocals : which === 'instrumental' ? x.instrumental : x.source;
+  if (!f) throw new Error('Файл ещё не готов');
+  return readFileSync(songs.file(id, f));
+});
+ipcMain.handle('songs:rewrite', async (e, id: string, spec: RewriteSpec) => {
+  rewriteAbort?.abort();
+  rewriteAbort = new AbortController();
+  try {
+    const song = songs.get(id);
+    const r = await rewriteSong(lm, settings.get(), song, spec, (c) => e.sender.send('songs:chunk', c), rewriteAbort.signal);
+    songs.update(id, { rewrite: { theme: spec.theme, title: r.title, text: r.text, matureDark: spec.matureDark, createdAt: new Date().toISOString() } });
+    if (settings.get().unloadLyricsModel) void lm.unload(settings.get().lyricsModel).catch(() => false);
+    return r;
+  } finally { rewriteAbort = null; }
+});
+ipcMain.handle('songs:cancelRewrite', () => { rewriteAbort?.abort(); });
+ipcMain.handle('songs:cleanup', async (_e, id: string) => {
+  const c = new AbortController();
+  return songItem(await songJobs.cleanup(id, c.signal));
+});
+ipcMain.handle('songs:analyzeStyle', async (_e, id: string) => {
+  if (generator.busy || voiceJobs.busy || songJobs.busy) throw new Error('Видеокарта занята другим заданием — попробуйте позже');
+  return songItem(await songJobs.analyzeStyle(id));
+});
+ipcMain.handle('songs:remake', (_e, spec: RemakeSpec) => songJobs.remake(spec));
+ipcMain.handle('songs:openRoot', async () => { await shell.openPath(settings.get().songsPath); });
 
 ipcMain.handle('library:list', () => library.list());
 ipcMain.handle('library:readAudio', (_e, id: string, file: string) => readFileSync(library.filePath(id, file)));

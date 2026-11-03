@@ -30,7 +30,7 @@ export function lyricsForAce(p: TrackParams, text: string): string {
   return sanitizeLyrics(text, { allowBacking: p.allowBacking, lang: p.language }).text;
 }
 
-export function buildAceRequest(p: TrackParams, lyrics: string, s: Settings): Record<string, unknown> {
+export function buildAceRequest(p: TrackParams, lyrics: string, s: Settings, opts: { srcAudioPath?: string | null } = {}): Record<string, unknown> {
   const t = timing(p);
   const req: Record<string, unknown> = {
     prompt: buildCaption(p),
@@ -53,6 +53,12 @@ export function buildAceRequest(p: TrackParams, lyrics: string, s: Settings): Re
   };
   if (p.key) req.key_scale = p.key;
   if (p.seedLocked) req.seed = p.seed;
+  // «по мотивам»: исходная песня — образец для ACE-Step (режим cover)
+  if (p.cover && opts.srcAudioPath && !p.instrumental) {
+    req.task_type = 'cover';
+    req.src_audio_path = opts.srcAudioPath;
+    req.audio_cover_strength = Math.min(1, Math.max(0.05, p.coverStrength ?? 0.5));
+  }
   return req;
 }
 

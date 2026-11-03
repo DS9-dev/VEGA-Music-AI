@@ -1,4 +1,7 @@
-import type { BackendStatus, JobState, LmModelInfo, LyricsChunk, LyricsResult, NewVoiceSpec, Settings, Track, TrackParams, VoiceCheck, VoiceItem, VoiceTrainProfile } from './types';
+import type {
+  BackendStatus, JobState, LmModelInfo, LyricsChunk, LyricsResult, NewVoiceSpec, RemakeSpec, RewriteResult, RewriteSpec, Settings, SongImportSpec, SongItem,
+  Track, TrackParams, VoiceCheck, VoiceItem, VoiceTrainProfile,
+} from './types';
 
 /** API, которое preload выставляет в window.api. */
 export interface MusicApi {
@@ -45,6 +48,22 @@ export interface MusicApi {
     importVoice(): Promise<VoiceItem | null>;
     check(): Promise<VoiceCheck>;
     revoice(trackId: string, variant: number, voiceId: string, shift: number | null): Promise<string>;
+    openRoot(): Promise<void>;
+  };
+  songs: {
+    list(): Promise<SongItem[]>;
+    pick(): Promise<string | null>;
+    importSong(spec: SongImportSpec): Promise<string>;
+    update(id: string, patch: { title?: string; lyrics?: string; rewrite?: SongItem['rewrite'] | null }): Promise<SongItem>;
+    remove(id: string): Promise<void>;
+    reveal(id: string): Promise<void>;
+    readAudio(id: string, which: 'source' | 'vocals' | 'instrumental'): Promise<ArrayBuffer>;
+    rewrite(id: string, spec: RewriteSpec): Promise<RewriteResult>;
+    cancelRewrite(): Promise<void>;
+    onChunk(cb: (c: LyricsChunk) => void): () => void;
+    cleanup(id: string): Promise<SongItem>;
+    analyzeStyle(id: string): Promise<SongItem>;
+    remake(spec: RemakeSpec): Promise<string>;
     openRoot(): Promise<void>;
   };
   win: { minimize(): void; maximize(): void; close(): void };

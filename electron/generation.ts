@@ -52,6 +52,8 @@ export interface GeneratorDeps {
   unloadLlm: () => Promise<void>;
   saveCalibration: (variants: 1 | 2, secPerAudioSec: number) => void;
   onUpdate: (s: JobState) => void;
+  /** Путь к исходной песне для режима «по мотивам» (V3). */
+  songSource?: (id: string) => string | null;
   /** Голосовые модели (V2). Без них трек поётся голосом ACE-Step. */
   voice?: {
     name: (id: string) => string | null; // null — голос не готов
@@ -119,7 +121,9 @@ export class Generator {
     this.set({ detail: 'Проверяем ACE-Step…', progress: 0.01, elapsedSec: elapsed() });
     await this.d.ensureAce((msg, starting) => this.set({ phase: starting ? 'starting' : 'preparing', detail: msg, elapsedSec: elapsed() }), signal);
 
-    const req = buildAceRequest(p, lyrics, s);
+    const src = p.cover && p.sourceSongId && !p.instrumental ? this.d.songSource?.(p.sourceSongId) ?? null : null;
+    if (p.cover && p.sourceSongId && !p.instrumental && !src) throw new Error('Исходная песня для режима «по мотивам» не найдена — выключите его или загрузите песню заново');
+    const req = buildAceRequest(p, lyrics, s, { srcAudioPath: src });
     const taskId = await this.d.ace.submit(req).catch(async (e) => {
       if (/init/i.test(String(e?.message))) {
         this.set({ phase: 'starting', detail: 'Загружаем модели ACE-Step (первый запуск может занять пару минут)…' });

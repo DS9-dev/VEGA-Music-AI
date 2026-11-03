@@ -47,7 +47,7 @@ export function SettingsView({ status }: { status: BackendStatus }) {
       void window.api.settings.set(all).then(() => toast('ok', 'Сохранено'));
     }, 500);
   };
-  const pick = async (key: 'aceRuntimePath' | 'libraryPath' | 'seedvcPath' | 'separatorPath' | 'melbandModelsPath' | 'transformersCachePath' | 'voicesPath') => {
+  const pick = async (key: 'aceRuntimePath' | 'libraryPath' | 'seedvcPath' | 'separatorPath' | 'melbandModelsPath' | 'transformersCachePath' | 'voicesPath' | 'songsPath' | 'asrModelsPath') => {
     const r = await window.api.settings.pickFolder(s[key]);
     if (r) upd({ [key]: r } as Partial<Settings>);
   };
@@ -163,8 +163,45 @@ export function SettingsView({ status }: { status: BackendStatus }) {
               {check && (
                 <div style={{ fontSize: 12.5, color: check.ok ? 'var(--ok)' : 'var(--warn)' }}>
                   {check.ok ? `Всё на месте${check.python ? ` · Python ${check.python}` : ''}${check.cuda ? ' · CUDA' : ''}` : check.problems.map((p) => <div key={p}>• {p}</div>)}
+                  <div style={{ color: check.asr ? 'var(--ok)' : 'var(--warn)', marginTop: 4 }}>
+                    {check.asr ? `Распознавание слов: ${check.asr}` : check.asr === null ? '• Распознавание слов: установите faster-whisper в окружение Seed-VC' : ''}
+                  </div>
                 </div>
               )}
+            </div>
+          </Row>
+        </div>
+
+        <div className="card">
+          <div className="card-title">Из песни · распознавание текста</div>
+          <Row label="Распознавание" hint="faster-whisper быстрее; transformers уже есть в Seed-VC">
+            <select className="select" value={s.asrBackend} onChange={(e) => upd({ asrBackend: e.target.value as Settings['asrBackend'] })}>
+              <option value="auto">Автоматически</option>
+              <option value="faster-whisper">faster-whisper</option>
+              <option value="transformers">transformers (Hugging Face)</option>
+            </select>
+          </Row>
+          <Row label="Модель Whisper" hint="large-v3 — точнее всего для пения; turbo — вдвое быстрее">
+            <select className="select" value={s.asrModel} onChange={(e) => upd({ asrModel: e.target.value })}>
+              {['large-v3', 'large-v3-turbo', 'medium', 'small'].map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </Row>
+          <Row label="Папка моделей распознавания" hint="Модель скачается сюда при первом разборе (≈ 3 ГБ)">
+            <div className="row">
+              <input className="input" value={s.asrModelsPath} onChange={(e) => upd({ asrModelsPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('asrModelsPath')}><IcFolder size={16} /></button>
+            </div>
+          </Row>
+          <Row label="Исправлять текст моделью" hint="После распознавания Qwen поправит ослышки и разметит секции">
+            <span onClick={() => upd({ songLlmCleanup: !s.songLlmCleanup })} style={{ cursor: 'pointer' }}><Switch on={s.songLlmCleanup} /></span>
+          </Row>
+          <Row label="Base-модель ACE-Step" hint="Для режима «Вокал поверх минуса» (lego)">
+            <input className="input" value={s.aceBaseModel} onChange={(e) => upd({ aceBaseModel: e.target.value })} />
+          </Row>
+          <Row label="Папка песен">
+            <div className="row">
+              <input className="input" value={s.songsPath} onChange={(e) => upd({ songsPath: e.target.value })} />
+              <button className="btn icon" onClick={() => pick('songsPath')}><IcFolder size={16} /></button>
             </div>
           </Row>
         </div>

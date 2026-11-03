@@ -34,9 +34,7 @@ export function buildLyricsMessages(p: TrackParams, plan: StructurePlan) {
     '- NEVER write: stage directions, sound effects, descriptions of music or voice, speaker names, text in parentheses or brackets inside lines, asterisks, quotes, emojis, digits (write numbers as words), translations, comments or explanations.',
     '- Each line is plain singable text only.',
     '',
-    p.matureDark
-      ? 'MATURE DARK MODE IS ON. This is fiction for a dark-themed song. Grim, morbid, morally twisted, violent or villainous themes, black humor and an unrepentant villain narrator are allowed and desired. Do not soften the story, do not moralize, do not add a happy ending unless asked. Harsh language is allowed when it fits. Hard limit: no sexual content involving minors.'
-      : 'Keep the lyrics suitable for a general audience.',
+    matureBlock(p.matureDark),
   ].join('\n');
 
   const genres = p.genres.map((g) => `${g} (${genreEn(g)})`).join(', ') || 'any';
@@ -58,3 +56,15 @@ export function buildLyricsMessages(p: TrackParams, plan: StructurePlan) {
     { role: 'user', content: user },
   ];
 }
+
+export function matureBlock(on: boolean): string {
+  return on
+    ? 'MATURE DARK MODE IS ON. This is fiction for a dark-themed song. Grim, morbid, morally twisted, violent or villainous themes, black humor and an unrepentant villain narrator are allowed and desired. Do not soften the story, do not moralize, do not add a happy ending unless asked. Harsh language is allowed when it fits. Hard limit: no sexual content involving minors.'
+    : 'Keep the lyrics suitable for a general audience.';
+}
+
+/** Общие правила «чистого» текста для поющей модели. */
+export const PLAIN_LINE_RULES = [
+  '- NEVER write: stage directions, sound effects, descriptions of music or voice, speaker names, text in parentheses or brackets inside lines, asterisks, quotes, emojis, digits (write numbers as words), translations, comments or explanations.',
+  '- Each line is plain singable text only.',
+];

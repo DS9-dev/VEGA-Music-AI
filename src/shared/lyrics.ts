@@ -212,6 +212,28 @@ function detectHeader(line: string): TagInfo | null {
   return null;
 }
 
+export interface TaggedBlock { tag: string; base: string; lines: string[] }
+
+/** Разбор текста с тегами на блоки: [Verse 1] + строки. Теги исполнения пропускаются. */
+export function splitTagged(text: string): TaggedBlock[] {
+  const blocks: TaggedBlock[] = [];
+  let cur: TaggedBlock | null = null;
+  for (const raw of text.replace(/\r/g, '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    const h = detectHeader(line);
+    if (h) {
+      if (h.kind === 'style') continue;
+      cur = { tag: h.tag, base: h.kind === 'unknown' ? 'Verse' : h.base, lines: [] };
+      blocks.push(cur);
+      continue;
+    }
+    if (!cur) { cur = { tag: 'Verse', base: 'Verse', lines: [] }; blocks.push(cur); }
+    cur.lines.push(line);
+  }
+  return blocks;
+}
+
 // ───────────────────────── Слоги ─────────────────────────
 
 const CYR_VOWELS = /[аеёиоуыэюяіїєАЕЁИОУЫЭЮЯІЇЄ]/g;

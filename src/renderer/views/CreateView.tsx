@@ -1,16 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { GENRES, KEYS, LANGUAGES, MOODS, TIMBRES, resolveBpm } from '../../shared/catalog';
 import { analyzeLyrics, fmtTime, planStructure, sanitizeLyrics } from '../../shared/lyrics';
-import type { BackendStatus, Density, TrackParams, VoiceItem } from '../../shared/types';
+import type { BackendStatus, Density, SongItem, TrackParams, VoiceItem } from '../../shared/types';
 import { ChipPicker, Range, Segmented, ToggleRow, useToast } from '../components/ui';
 import { LyricsEditor } from '../components/LyricsEditor';
 import { ShiftPicker } from '../components/VoiceDialogs';
-import { IcChevron, IcDice, IcFemale, IcLock, IcMale, IcMic, IcPiano, IcSkull, IcSparkles, IcStop, IcTrash, IcUnlock, IcWand } from '../icons';
+import { SECTION_RU } from '../sections';
+import { IcChevron, IcDice, IcDisc, IcX, IcFemale, IcLock, IcMale, IcMic, IcPiano, IcSkull, IcSparkles, IcStop, IcTrash, IcUnlock, IcWand } from '../icons';
 
-const SECTION_RU: Record<string, string> = {
-  Intro: 'Интро', 'Verse 1': 'Куплет 1', 'Verse 2': 'Куплет 2', 'Verse 3': 'Куплет 3', 'Pre-Chorus': 'Распевка',
-  Chorus: 'Припев', Bridge: 'Бридж', Outro: 'Аутро', 'Guitar Solo': 'Соло', 'Piano Interlude': 'Проигрыш', Instrumental: 'Проигрыш',
-};
 
 export interface Draft { title: string; text: string }
 
@@ -24,6 +21,8 @@ export function CreateView(props: {
   onCreate: () => void;
   voices: VoiceItem[];
   onOpenVoices: () => void;
+  songs: SongItem[];
+  onOpenSong: (id: string) => void;
 }) {
   const { params: p, setParams, draft, setDraft } = props;
   const toast = useToast();
@@ -76,6 +75,30 @@ export function CreateView(props: {
           <textarea className="textarea" rows={5} value={p.theme} onChange={(e) => set('theme', e.target.value)}
             placeholder="О чём песня? Сюжет, герои, имена, настроение, ключевые образы…&#10;&#10;Например: ночной курьер мчится сквозь неоновый город под ливнем, чтобы успеть до рассвета" />
         </div>
+
+        {p.sourceSongId && (() => {
+          const src = props.songs.find((x) => x.id === p.sourceSongId);
+          return (
+            <div className="card source-card">
+              <div className="card-title"><IcDisc size={16} /> Из песни
+                <span className="hint" style={{ display: 'flex', gap: 6 }}>
+                  {src && <button className="link-btn" onClick={() => props.onOpenSong(src.id)}>«{src.title}»</button>}
+                  <button className="btn sm icon ghost" title="Отвязать от песни" onClick={() => setParams({ ...p, sourceSongId: null, cover: false })}><IcX size={13} /></button>
+                </span>
+              </div>
+              {!src && <div className="plan-line" style={{ color: 'var(--warn)', marginTop: 0 }}>Исходная песня удалена — «по мотивам» недоступно.</div>}
+              <ToggleRow on={!!p.cover && !!src} onChange={(v) => set('cover', v)}
+                title="По мотивам оригинала" desc="Исходная песня — образец для ACE-Step: аранжировка и звучание будут похожи" />
+              {p.cover && src && (
+                <div className="field">
+                  <div className="label">Сходство с оригиналом <span className="value">{Math.round((p.coverStrength ?? 0.5) * 100)}%</span></div>
+                  <Range value={Math.round((p.coverStrength ?? 0.5) * 100)} min={10} max={100} step={5} onChange={(v) => set('coverStrength', v / 100)} />
+                  <div className="range-scale"><span>только характер</span><span>близко к оригиналу</span></div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         <div className="card">
           <div className="card-title">Жанр <span className="hint">можно несколько</span></div>
@@ -239,7 +262,7 @@ export function CreateView(props: {
           <div className="summary">
             <div className="summary-main">{draft.title || 'Без названия'}</div>
             <div className="summary-sub">
-              {[p.genres.join(', ') || 'жанр не выбран', p.instrumental ? 'инструментал' : voice ? `голос «${voice.name}»` : `${p.voice === 'male' ? 'мужской' : 'женский'} вокал`, fmtTime(p.duration), `${bpm} BPM`, p.matureDark ? 'Mature Dark' : '']
+              {[p.genres.join(', ') || 'жанр не выбран', p.instrumental ? 'инструментал' : voice ? `голос «${voice.name}»` : `${p.voice === 'male' ? 'мужской' : 'женский'} вокал`, fmtTime(p.duration), `${bpm} BPM`, p.cover && p.sourceSongId ? 'по мотивам' : '', p.matureDark ? 'Mature Dark' : '']
                 .filter(Boolean).join(' · ')}
             </div>
           </div>

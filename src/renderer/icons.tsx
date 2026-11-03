@@ -43,3 +43,6 @@ export const IcPlus = mk(<path d="M12 5v14M5 12h14" />);
 export const IcUpload = mk(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m17 8-5-5-5 5M12 3v12" /></>);
 export const IcDownload = mk(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><path d="m7 10 5 5 5-5M12 15V3" /></>);
 export const IcEdit = mk(<><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" /></>);
+export const IcDisc = mk(<><circle cx="12" cy="12" r="10" /><circle cx="12" cy="12" r="3" /><path d="M6.2 9.5a6.5 6.5 0 0 1 3.3-3.3" /></>);
+export const IcWave = mk(<path d="M2 12h2l2-6 3 12 3-15 3 18 3-12 2 3h2" />);
+export const IcArrowRight = mk(<path d="M5 12h14M13 6l6 6-6 6" />);

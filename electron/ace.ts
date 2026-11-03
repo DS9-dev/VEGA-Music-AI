@@ -75,6 +75,16 @@ export class AceClient {
     return q;
   }
 
+  /** Сырой ответ по задаче (для анализа аудио: bpm, тональность, описание стиля). */
+  async queryRaw(taskId: string): Promise<{ status: 0 | 1 | 2; data: any }> {
+    const data = await this.call('POST', '/query_result', { task_id_list: [taskId] }, 20_000);
+    const item = Array.isArray(data) ? data[0] ?? {} : {};
+    const status = Number(item.status) || 0;
+    let result: any = item.result;
+    try { if (typeof result === 'string') result = JSON.parse(result || 'null'); } catch { /* текст */ }
+    return { status: status === 1 ? 1 : status >= 2 ? 2 : 0, data: { ...item, result } };
+  }
+
   async download(fileRef: string, dest: string): Promise<void> {
     const path = fileRef.startsWith('/') ? fileRef : `/v1/audio?path=${encodeURIComponent(fileRef)}`;
     const res = await fetch(this.base() + path, { signal: AbortSignal.timeout(180_000) });

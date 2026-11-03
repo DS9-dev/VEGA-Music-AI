@@ -22,6 +22,9 @@ export interface TrackParams {
   allowBacking: boolean; // разрешить бэк-вокал в (скобках)
   voiceId: string | null; // своя голосовая модель (V2) или null — голос ACE-Step
   voiceShift: number | null; // сдвиг тона для голосовой модели, null — авто (кратно октаве)
+  sourceSongId?: string | null; // песня, из которой взят текст (V3)
+  cover?: boolean; // «по мотивам»: исходная песня идёт в ACE-Step как образец (режим cover)
+  coverStrength?: number; // 0.1–1 — насколько близко к оригиналу
 }
 
 export interface Settings {
@@ -49,7 +52,16 @@ export interface Settings {
   voicesPath: string;
   voiceDiffusionSteps: number; // 25–50
   freeAceForVoice: boolean; // останавливать ACE-Step перед обработкой голоса (экономия видеопамяти)
+  // ── песни (V3) ──
+  songsPath: string;
+  asrBackend: AsrBackend;
+  asrModel: string; // large-v3, large-v3-turbo, medium…
+  asrModelsPath: string; // куда скачивать модели распознавания
+  songLlmCleanup: boolean; // исправлять распознанный текст моделью из LM Studio
+  aceBaseModel: string; // base-модель ACE-Step для режима «вокал поверх минуса» (lego)
 }
+
+export type AsrBackend = 'auto' | 'faster-whisper' | 'transformers';
 
 export interface TrackVariant {
   file: string; // имя файла в папке трека
@@ -75,7 +87,7 @@ export interface Track {
 
 export type JobPhase = 'idle' | 'preparing' | 'starting' | 'generating' | 'saving' | 'done' | 'error' | 'cancelled';
 
-export type JobKind = 'track' | 'voice' | 'revoice';
+export type JobKind = 'track' | 'voice' | 'revoice' | 'song' | 'remake';
 
 export interface JobState {
   id: string;
@@ -163,4 +175,74 @@ export type VoiceItem = VoiceModel & { usable: boolean };
 
 export const VOICE_PROFILE_STEPS: Record<VoiceTrainProfile, number> = { zero: 0, quick: 300, standard: 800, max: 2000 };
 
-export interface VoiceCheck { ok: boolean; problems: string[]; cuda: boolean | null; python?: string }
+export interface VoiceCheck { ok: boolean; problems: string[]; cuda: boolean | null; python?: string; asr?: string | null }
+
+// ───────────────────────── Песни (V3) ─────────────────────────
+
+export interface SongWord { w: string; s: number; e: number }
+export interface SongLine { text: string; start: number; end: number }
+
+export interface SongSection {
+  tag: string; // Verse 1, Chorus, Intro, Instrumental, Outro…
+  kind: 'vocal' | 'instrumental';
+  start: number;
+  end: number;
+  lines: SongLine[];
+  group?: string; // одинаковые группы — повторы (припев)
+}
+
+export type SongStatus = 'analyzing' | 'ready' | 'error';
+
+export interface Song {
+  id: string;
+  title: string;
+  createdAt: string;
+  status: SongStatus;
+  sourceName: string;
+  source: string; // имя файла в папке песни
+  vocals?: string;
+  instrumental?: string;
+  duration: number;
+  bpm: number | null;
+  key: string | null;
+  gender: VoiceGender | null;
+  f0Median?: number | null;
+  note?: string;
+  language: string; // код языка (распознанный или выбранный)
+  sections: SongSection[];
+  lyrics: string; // текст с тегами, правится пользователем
+  recognized?: string; // как распознал Whisper, до исправлений
+  caption?: string; // описание стиля (ACE-Step)
+  genres?: string[];
+  rewrite?: { theme: string; title: string; text: string; matureDark?: boolean; createdAt: string };
+  warnings: string[];
+  error?: string;
+}
+
+export type SongItem = Song & { paths: { source: string; vocals?: string; instrumental?: string } };
+
+export interface SongImportSpec { path: string; language: string | null; cleanup: boolean }
+
+export interface RewriteSpec { theme: string; matureDark: boolean; text?: string }
+
+export interface RewriteResult {
+  title: string;
+  text: string;
+  warnings: string[];
+  checks: { name: string; target: number; actual: number; level: string }[];
+}
+
+export type RemakeMethod = 'repaint' | 'lego';
+
+export interface RemakeSpec {
+  songId: string;
+  text: string;
+  title: string;
+  method: RemakeMethod;
+  voiceId: string | null; // null — голос ACE-Step
+  voiceShift: number | null;
+  variants: 1 | 2;
+  keepAce: boolean; // сохранять исходный вокал ACE-Step рядом
+}
+
+export interface SectionBudget { tag: string; group?: string; start: number; end: number; target: number; original: number; actual?: number }

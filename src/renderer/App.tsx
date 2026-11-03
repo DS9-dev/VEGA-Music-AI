@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { DEFAULT_PARAMS } from '../shared/catalog';
-import type { BackendStatus, JobState, Track, TrackParams, VoiceItem } from '../shared/types';
+import { songTrackParams } from '../shared/song';
+import type { BackendStatus, JobState, SongItem, Track, TrackParams, VoiceItem } from '../shared/types';
 import { GenerationOverlay } from './components/GenerationOverlay';
 import { PlayerBar, usePlayer } from './components/Player';
 import { useToast } from './components/ui';
-import { IcLibrary, IcLogo, IcMic, IcMinimize, IcSettings, IcSparkles, IcX } from './icons';
+import { IcDisc, IcLibrary, IcLogo, IcMic, IcMinimize, IcSettings, IcSparkles, IcX } from './icons';
 import { CreateView, type Draft } from './views/CreateView';
 import { LibraryView } from './views/LibraryView';
 import { SettingsView } from './views/SettingsView';
+import { SongsView } from './views/SongsView';
 import { VoicesView } from './views/VoicesView';
 
-type View = 'create' | 'library' | 'voices' | 'settings';
-const TITLES: Record<View, string> = { create: 'Новый трек', library: 'Библиотека', voices: 'Голоса', settings: 'Настройки' };
+type View = 'create' | 'songs' | 'library' | 'voices' | 'settings';
+const TITLES: Record<View, string> = { create: 'Новый трек', songs: 'Из песни', library: 'Библиотека', voices: 'Голоса', settings: 'Настройки' };
 
 function load<T>(key: string, fallback: T): T {
   try { const v = localStorage.getItem(key); return v ? { ...fallback, ...JSON.parse(v) } : fallback; } catch { return fallback; }
@@ -36,6 +38,10 @@ export function App() {
   const [voices, setVoices] = useState<VoiceItem[]>([]);
   const refreshVoices = () => { void window.api.voices.list().then(setVoices).catch(() => {}); };
   useEffect(refreshVoices, []);
+  const [songs, setSongs] = useState<SongItem[]>([]);
+  const [songFocus, setSongFocus] = useState<string | null>(null);
+  const refreshSongs = () => { void window.api.songs.list().then(setSongs).catch(() => {}); };
+  useEffect(refreshSongs, []);
 
   useEffect(() => save('mb.params', params), [params]);
   useEffect(() => { const t = setTimeout(() => save('mb.draft', draft), 300); return () => clearTimeout(t); }, [draft]);
@@ -58,8 +64,10 @@ export function App() {
       setJob(s);
       // голос меняет статус — обновляем список на каждом этапе
       if (s.kind === 'voice' && (s.phase !== prev?.phase || s.step !== prev?.step)) refreshVoices();
-      if ((s.phase === 'done' || s.phase === 'error') && prev?.phase !== s.phase) {
+      if (s.kind === 'song' && (s.phase !== prev?.phase || s.step !== prev?.step)) refreshSongs();
+      if ((s.phase === 'done' || s.phase === 'error' || s.phase === 'cancelled') && prev?.phase !== s.phase) {
         refreshVoices();
+        refreshSongs();
         if (s.trackId) {
           setLibKey((k) => k + 1);
           const list = await window.api.library.list();
@@ -94,6 +102,14 @@ export function App() {
     toast('ok', `Трек будет спет голосом «${v.name}»`);
   };
 
+  const useSongText = (song: SongItem, text: string, title: string) => {
+    setParams(songTrackParams(song, params));
+    setDraft({ title, text });
+    setView('create');
+    toast('ok', 'Текст, темп и длительность песни загружены');
+  };
+  const openSong = (id: string | null | undefined) => { if (id) setSongFocus(id); setView('songs'); };
+
   const showOverlay = overlay && !!job && job.phase !== 'idle';
   const mac = window.api.platform === 'darwin';
 
@@ -105,6 +121,7 @@ export function App() {
           <div><div className="brand-name">VEGA-Music-AI</div><div className="brand-ver" title={`Сборка ${BUILD_LABEL}`}>v{__APP_VERSION__} · {BUILD_LABEL}</div></div>
         </div>
         <button className={`nav-item ${view === 'create' ? 'active' : ''}`} onClick={() => setView('create')}><IcSparkles size={17} /> Создать</button>
+        <button className={`nav-item ${view === 'songs' ? 'active' : ''}`} onClick={() => setView('songs')}><IcDisc size={17} /> Из песни{songs.length > 0 && <span className="nav-badge">{songs.length}</span>}</button>
         <button className={`nav-item ${view === 'library' ? 'active' : ''}`} onClick={() => setView('library')}><IcLibrary size={17} /> Библиотека</button>
         <button className={`nav-item ${view === 'voices' ? 'active' : ''}`} onClick={() => setView('voices')}><IcMic size={17} /> Голоса{voices.length > 0 && <span className="nav-badge">{voices.length}</span>}</button>
         <button className={`nav-item ${view === 'settings' ? 'active' : ''}`} onClick={() => setView('settings')}><IcSettings size={17} /> Настройки</button>
@@ -145,8 +162,10 @@ export function App() {
         <div className={`content ${player.track ? 'with-player' : ''}`}>
           {view === 'create' && (
             <CreateView params={params} setParams={setParams} draft={draft} setDraft={setDraft} status={status} busy={busy} onCreate={create}
-              voices={voices} onOpenVoices={() => setView('voices')} />
+              voices={voices} onOpenVoices={() => setView('voices')} songs={songs} onOpenSong={openSong} />
           )}
+          {view === 'songs' && <SongsView songs={songs} refresh={refreshSongs} job={job} focusId={songFocus} status={status} voices={voices}
+            onJobStarted={() => setOverlay(true)} onVoiceStarted={() => { setOverlay(true); refreshVoices(); }} onUseText={useSongText} />}
           {view === 'library' && <LibraryView refreshKey={libKey} onReuse={reuse} onCreate={() => setView('create')} voices={voices} onJobStarted={() => setOverlay(true)} />}
           {view === 'voices' && <VoicesView voices={voices} refresh={refreshVoices} job={job} onJobStarted={() => { setOverlay(true); refreshVoices(); }}
             onUse={useVoice} onSettings={() => setView('settings')} />}
@@ -155,12 +174,13 @@ export function App() {
         {showOverlay && job && (
           <GenerationOverlay
             job={job}
-            variants={job.kind === 'voice' ? [] : (lastTrack?.variants ?? []).filter((v) => !v.original).map((v, i) => v.label ?? `Вариант ${i + 1}`)}
+            variants={job.kind === 'voice' || job.kind === 'song' ? [] : (lastTrack?.variants ?? []).filter((v) => !v.original).map((v, i) => v.label ?? `Вариант ${i + 1}`)}
             onHide={() => setOverlay(false)}
             onCancel={() => void window.api.job.cancel()}
             onClose={closeJob}
             onOpenLibrary={() => { void closeJob(); setView('library'); }}
             onOpenVoices={() => { void closeJob(); setView('voices'); }}
+            onOpenSongs={() => { const id = job.targetId; void closeJob(); openSong(id); }}
             onUseVoice={() => { const v = voices.find((x) => x.id === job.targetId); void closeJob(); if (v) useVoice(v); else setView('voices'); }}
             onPlay={(i) => lastTrack && player.play(lastTrack, i)}
           />

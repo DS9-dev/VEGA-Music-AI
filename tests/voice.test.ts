@@ -16,6 +16,10 @@ import { defaultSettings } from '../electron/settings';
 import { applyVoice, VoiceJobs } from '../electron/voiceJobs';
 import { VoiceStore } from '../electron/voices';
 import type { WorkerConfig } from '../electron/voiceWorker';
+import { SongStore } from '../electron/songs';
+import { findAnalysis, rewriteSong, SongJobs } from '../electron/songJobs';
+import { buildAceRequest } from '../src/shared/caption';
+import { buildLines, buildSections, sectionsToLyrics } from '../src/shared/song';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import type { JobState, Settings } from '../src/shared/types';
 
@@ -221,4 +225,177 @@ test('создание трека с голосом: ACE → перепевка 
   for (const v of t.variants) assert.ok(existsSync(library.filePath(t.id, v.file)), v.file);
   // выбранный, но не готовый голос — понятная ошибка до запуска
   assert.throws(() => gen.start({ ...DEFAULT_PARAMS, voiceId: 'нет-такого' }, 'x', 'y'), /не готов/);
+});
+
+// ───────────────────────── Песни (V3) ─────────────────────────
+
+/** Имитация LM Studio: отдаёт заготовленные ответы по очереди. */
+function fakeLm(answers: string[]) {
+  const calls: { role: string; content: string }[][] = [];
+  return {
+    calls,
+    isOnline: async () => true,
+    unload: async () => true,
+    streamChat: async (body: { messages: { role: string; content: string }[] }, onDelta: (full: string, r: boolean) => void) => {
+      calls.push(body.messages);
+      const a = answers[Math.min(calls.length - 1, answers.length - 1)];
+      onDelta(a, false);
+      return a;
+    },
+  };
+}
+
+function songWords() {
+  const line = (text: string, at: number) => text.split(' ').map((w, i) => ({ w, s: at + i * 0.35, e: at + i * 0.35 + 0.3 }));
+  return [
+    ...line('Ночь моя неоновая ночь', 0.5), ...line('Унеси печали прочь', 3.0),
+    ...line('Город спит под тёплым дождём', 11.5), ...line('Фонари горят за окном', 14.0),
+    ...line('Ночь моя неоновая ночь', 22.0), ...line('Унеси печали прочь', 24.5),
+  ];
+}
+
+function songSetup() {
+  const base = setup();
+  const fake = join(base.root, 'words.json');
+  writeFileSync(fake, JSON.stringify({ words: songWords(), language: 'ru' }));
+  process.env.VEGA_ASR_FAKE = fake;
+  base.s.songsPath = join(base.root, 'Songs');
+  const songs = new SongStore(() => base.s.songsPath);
+  return { ...base, songs };
+}
+
+test('импорт песни: вокал и минус → слова → секции с припевом → исправление моделью', { skip: !hasPy && 'нет Python' }, async () => {
+  const { s, store, library, worker, song, songs } = songSetup();
+  const lm = fakeLm(['#1 [Chorus]\nНочь моя неоновая ночь\nУнеси печали прочь\n#2 [Verse]\nГород спит под тёплым дождём\nФонари горят за окном\n#3 [Chorus]\nНочь моя неоновая ночь\nУнеси печали прочь']);
+  let gpu = 0;
+  const jobs = new SongJobs({
+    store: songs, library, voices: store, lm: lm as any, ace: new AceClient(() => s.aceEndpoint), settings: () => s, worker,
+    ensureAce: async () => {}, prepareGpu: async () => { gpu++; }, unloadLlm: async () => {}, gpuBusy: () => false, onUpdate: () => {},
+  });
+  const id = jobs.importSong({ path: song, language: null, cleanup: true });
+  const fin = await waitJob(() => jobs.state);
+  assert.equal(fin.phase, 'done', fin.error ?? '');
+  assert.equal(gpu, 1);
+  const x = songs.get(id);
+  assert.equal(x.status, 'ready');
+  assert.equal(x.language, 'ru');
+  assert.equal(x.gender, 'male');
+  assert.ok(x.duration > 29 && x.duration < 31);
+  const voc = x.sections.filter((q) => q.kind === 'vocal');
+  assert.deepEqual(voc.map((q) => q.tag), ['Chorus', 'Verse 1', 'Chorus']);
+  assert.equal(voc[0].group, voc[2].group);
+  assert.match(x.lyrics, /\[Chorus\]\nНочь моя неоновая ночь\nУнеси печали прочь/);
+  assert.ok(x.recognized && x.vocals && x.instrumental);
+  assert.ok(existsSync(join(songs.dir(id), 'vocals.wav')) && existsSync(join(songs.dir(id), 'instrumental.wav')));
+  assert.equal(lm.calls.length, 1);
+  assert.ok(songs.item(x).paths.vocals!.endsWith('vocals.wav'));
+});
+
+test('переписывание на тему: бюджет слогов и одна попытка исправить промахнувшиеся секции', async () => {
+  const sections = buildSections(buildLines(songWords(), 120), 30, 120);
+  const song = { id: 's', title: 'Неон', createdAt: '', status: 'ready' as const, sourceName: '', source: 'source.wav', duration: 30, bpm: 120, key: null,
+    gender: 'male' as const, language: 'ru', sections, lyrics: sectionsToLyrics(sections), warnings: [] };
+  const lm = fakeLm([
+    'TITLE: Зимний вечер\n[Chorus]\nВечер мой холодный вечер\nСнег ложится мне на плечи\n[Verse 1]\nКороткая строка',
+    '[Verse 1]\nТихо падает на крыши снег\nЗамедляет время свой разбег',
+  ]);
+  const chunks: string[] = [];
+  const r = await rewriteSong(lm as any, defaultSettings('/tmp/x'), song, { theme: 'зима', matureDark: false }, (c) => chunks.push(c.text), new AbortController().signal);
+  assert.equal(lm.calls.length, 2, 'вторая попытка — только для промахнувшегося куплета');
+  assert.match(lm.calls[1].at(-1)!.content, /\[Verse 1\] has \d+ syllables/);
+  assert.equal(r.title, 'Зимний вечер');
+  assert.equal(r.text.match(/Вечер мой холодный вечер/g)!.length, 2);
+  assert.match(r.text, /Тихо падает на крыши снег/);
+  assert.ok(r.checks.every((c) => c.actual > 0));
+  assert.ok(chunks.length >= 2);
+});
+
+test('новые слова на эту музыку: repaint и lego → новый вокал → родной минус', { skip: !hasPy && 'нет Python' }, async () => {
+  const { s, store, library, worker, song, songs, root } = songSetup();
+  const voiceJobs = new VoiceJobs({ store, library, settings: () => s, worker, prepareGpu: async () => {}, gpuBusy: () => false, onUpdate: () => {} });
+  const vid = voiceJobs.create({ name: 'Солист', gender: 'male', sources: [{ path: song, kind: 'clean' }], profile: 'zero', consent: true });
+  await waitJob(() => voiceJobs.state);
+  const wav = readFileSync(song);
+  const bodies: any[] = [];
+  let inits = 0;
+  let polls = 0;
+  const server = createServer((req, res) => {
+    const send = (data: any, code = 200) => { res.statusCode = code; res.end(JSON.stringify(code === 200 ? { data, code: 200 } : { detail: data })); };
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      if (req.url === '/release_task') {
+        const b = JSON.parse(body);
+        bodies.push(b);
+        if (b.task_type === 'lego' && inits === 0) { send('Model acestep-v15-base not loaded', 400); return; }
+        send({ task_id: `t${bodies.length}` });
+        return;
+      }
+      if (req.url === '/v1/init') { inits++; send({ ok: true }); return; }
+      if (req.url === '/query_result') {
+        send([polls++ % 2 === 0 ? { status: 0, result: JSON.stringify([{ progress: 0.4 }]) } : { status: 1, result: JSON.stringify([{ file: '/v1/audio?path=a.wav' }]) }]);
+        return;
+      }
+      if (req.url?.startsWith('/v1/audio')) { res.end(wav); return; }
+      res.statusCode = 404; res.end();
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+  s.aceEndpoint = `http://127.0.0.1:${(server.address() as any).port}`;
+  s.calibration = { '1': 0.01, '2': 0.01, overhead: 1 };
+  const jobs = new SongJobs({
+    store: songs, library, voices: store, lm: fakeLm(['']) as any, ace: new AceClient(() => s.aceEndpoint), settings: () => s, worker,
+    ensureAce: async () => {}, prepareGpu: async () => {}, unloadLlm: async () => {}, gpuBusy: () => false, onUpdate: () => {},
+  });
+  const id = jobs.importSong({ path: song, language: 'ru', cleanup: false });
+  await waitJob(() => jobs.state);
+  const text = '[Chorus]\nСнег идёт и тает снег\n[Verse 1]\nНовый куплет\n[Chorus]\nСнег идёт и тает снег';
+
+  jobs.remake({ songId: id, text, title: 'Снег', method: 'repaint', voiceId: null, voiceShift: null, variants: 1, keepAce: true });
+  let fin = await waitJob(() => jobs.state);
+  assert.equal(fin.phase, 'done', fin.error ?? '');
+  const rp = bodies.at(-1);
+  assert.equal(rp.task_type, 'repaint');
+  assert.equal(rp.src_audio_path, join(songs.dir(id), 'source.wav'));
+  assert.ok(rp.repainting_start > 0 && rp.repainting_start < 1 && rp.repainting_end > 26 && rp.repainting_end <= 30.1, `${rp.repainting_start}–${rp.repainting_end}`);
+  assert.match(rp.prompt, /male vocal/);
+  assert.match(rp.lyrics, /Снег идёт/);
+  let t = library.read(fin.trackId!);
+  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1', 'Вариант 1 · ACE']);
+  for (const v of t.variants) assert.ok(existsSync(library.filePath(t.id, v.file)), v.file);
+
+  jobs.remake({ songId: id, text, title: 'Снег 2', method: 'lego', voiceId: vid, voiceShift: null, variants: 1, keepAce: false });
+  fin = await waitJob(() => jobs.state);
+  server.close();
+  assert.equal(fin.phase, 'done', fin.error ?? '');
+  assert.equal(inits, 1, 'base-модель загружена по требованию');
+  const lg = bodies.at(-1);
+  assert.equal(lg.task_type, 'lego');
+  assert.equal(lg.track_name, 'vocals');
+  assert.equal(lg.src_audio_path, join(songs.dir(id), 'instrumental.wav'));
+  assert.equal(lg.model, s.aceBaseModel);
+  t = library.read(fin.trackId!);
+  assert.equal(t.voiceName, 'Солист');
+  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1']);
+  assert.ok(!existsSync(library.filePath(t.id, 'variant-1-ace.wav')), 'исходник ACE удалён, когда не нужен');
+  void root;
+});
+
+test('«по мотивам»: запрос ACE-Step в режиме cover с исходной песней', () => {
+  const s = defaultSettings('/tmp/x');
+  const p = { ...DEFAULT_PARAMS, sourceSongId: 'a', cover: true, coverStrength: 0.7 };
+  const req = buildAceRequest(p, '[Verse 1]\nстрока', s, { srcAudioPath: 'T:/Songs/a/source.mp3' });
+  assert.equal(req.task_type, 'cover');
+  assert.equal(req.src_audio_path, 'T:/Songs/a/source.mp3');
+  assert.equal(req.audio_cover_strength, 0.7);
+  const plain = buildAceRequest({ ...p, cover: false }, '[Verse 1]\nстрока', s, { srcAudioPath: 'x' });
+  assert.equal(plain.task_type, undefined);
+});
+
+test('анализ стиля ACE-Step: поиск описания в ответе любой версии', () => {
+  const r = findAnalysis({ status: 1, result: [{ metas: { bpm: 124, keyscale: 'f# minor', genres: 'synthwave, pop' }, prompt: 'dreamy synthwave with male vocals' }] });
+  assert.equal(r.bpm, 124);
+  assert.equal(r.key, 'F# minor');
+  assert.deepEqual(r.genres, ['synthwave', 'pop']);
+  assert.equal(r.caption, 'dreamy synthwave with male vocals');
 });

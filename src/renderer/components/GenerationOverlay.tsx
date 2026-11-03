@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fmtTime } from '../../shared/lyrics';
 import type { JobState } from '../../shared/types';
-import { IcCheck, IcLibrary, IcMic, IcMinimize, IcPlay, IcRepeat, IcSparkles, IcX } from '../icons';
+import { IcCheck, IcDisc, IcLibrary, IcMic, IcMinimize, IcPlay, IcRepeat, IcSparkles, IcX } from '../icons';
 import { Visualizer } from './Visualizer';
 
 const STEPS = ['Подготовка', 'Композиция', 'Синтез', 'Сохранение'];
@@ -46,6 +46,7 @@ export function GenerationOverlay(props: {
   onOpenLibrary: () => void;
   onOpenVoices: () => void;
   onUseVoice: () => void;
+  onOpenSongs: () => void;
   onPlay: (variantIndex: number) => void;
   variants: string[]; // подписи вариантов готового трека
 }) {
@@ -59,13 +60,14 @@ export function GenerationOverlay(props: {
   const kind = job.kind ?? 'track';
   const steps = job.steps ?? STEPS;
   const title = done
-    ? { track: 'Трек готов!', voice: 'Голос готов!', revoice: 'Трек перепет!' }[kind]
+    ? { track: 'Трек готов!', voice: 'Голос готов!', revoice: 'Трек перепет!', song: 'Песня разобрана!', remake: 'Новые слова спеты!' }[kind]
     : failed
       ? (job.phase === 'cancelled' ? 'Отменено' : 'Не получилось')
-      : { track: `Создаём «${job.title}»`, voice: `Обучаем голос «${job.title}»`, revoice: `Перепеваем «${job.title}»` }[kind];
-  const doneDetail = kind === 'voice' ? job.detail : 'Сохранён в библиотеку';
-  const cancelHint = kind === 'track' ? 'Результат не сохранится. ACE-Step может дорабатывать задачу в фоне ещё немного.'
+      : { track: `Создаём «${job.title}»`, voice: `Обучаем голос «${job.title}»`, revoice: `Перепеваем «${job.title}»`, song: `Разбираем «${job.title}»`, remake: `Поём «${job.title}»` }[kind];
+  const doneDetail = kind === 'voice' || kind === 'song' ? job.detail : 'Сохранён в библиотеку';
+  const cancelHint = kind === 'track' || kind === 'remake' ? 'Результат не сохранится. ACE-Step может дорабатывать задачу в фоне ещё немного.'
     : kind === 'voice' ? 'Если фразы уже нарезаны, голос останется доступным без обучения.' : 'Результат не сохранится.';
+  const hasTrack = kind !== 'voice' && kind !== 'song';
 
   return (
     <div className="overlay">
@@ -104,7 +106,7 @@ export function GenerationOverlay(props: {
 
           {failed && job.error && <div className="gen-error">{job.error}</div>}
 
-          {done && kind !== 'voice' && props.variants.length > 0 && (
+          {done && hasTrack && props.variants.length > 0 && (
             <div className="variants">
               {props.variants.map((label, i) => (
                 <button key={i} className="btn soft" onClick={() => props.onPlay(i)}><IcPlay size={14} /> {label}</button>
@@ -121,10 +123,15 @@ export function GenerationOverlay(props: {
               <button className="btn primary" onClick={props.onUseVoice}><IcSparkles size={16} /> Создать трек этим голосом</button>
               <button className="btn" onClick={props.onOpenVoices}><IcMic size={16} /> К голосам</button>
             </>}
-            {done && kind !== 'voice' && <>
+            {done && kind === 'song' && <>
+              <button className="btn primary" onClick={props.onOpenSongs}><IcDisc size={16} /> Открыть песню</button>
+              <button className="btn" onClick={props.onClose}>Закрыть</button>
+            </>}
+            {done && hasTrack && <>
               <button className="btn primary" onClick={props.onOpenLibrary}><IcLibrary size={16} /> Открыть в библиотеке</button>
               <button className="btn" onClick={props.onClose}>{kind === 'track' ? <><IcRepeat size={16} /> Создать ещё</> : 'Закрыть'}</button>
             </>}
+            {failed && kind === 'song' && job.targetId && <button className="btn" onClick={props.onOpenSongs}><IcDisc size={16} /> К песне</button>}
             {failed && job.trackId && <button className="btn primary" onClick={props.onOpenLibrary}><IcLibrary size={16} /> Открыть в библиотеке</button>}
             {failed && <button className="btn" onClick={props.onClose}>Закрыть</button>}
           </div>

@@ -116,6 +116,47 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(vv.note_name(196.0), "G3")
 
 
+def click_track(bpm, seconds, sr=SR):
+    x = np.zeros(int(seconds * sr), dtype=np.float32)
+    period = 60.0 / bpm
+    rng = np.random.default_rng(3)
+    t = 0.0
+    beat = 0
+    while t < seconds - 0.1:
+        i = int(t * sr)
+        n = int(0.03 * sr)
+        amp = 0.8 if beat % 4 == 0 else 0.5
+        x[i:i + n] += (rng.normal(0, amp, n) * np.exp(-np.arange(n) / (0.006 * sr))).astype(np.float32)
+        t += period
+        beat += 1
+    return x
+
+
+def chord_pad(notes_hz, seconds, sr=SR):
+    return sum(tone(h, seconds, sr, amp=0.2) for h in notes_hz).astype(np.float32)
+
+
+class MusicAnalysisTests(unittest.TestCase):
+    def test_bpm(self):
+        for bpm in (90, 120, 140):
+            est = vv.estimate_bpm(click_track(bpm, 30), SR)
+            self.assertIsNotNone(est)
+            self.assertAlmostEqual(est, bpm, delta=2.5, msg=f"{bpm} → {est}")
+
+    def test_key_major_and_minor(self):
+        c_major = np.concatenate([chord_pad([261.6, 329.6, 392.0], 3), chord_pad([349.2, 440.0, 523.3], 3),
+                                  chord_pad([392.0, 493.9, 587.3], 3), chord_pad([261.6, 329.6, 392.0], 3)])
+        self.assertEqual(vv.estimate_key(c_major, SR), "C major")
+        a_minor = np.concatenate([chord_pad([220.0, 261.6, 329.6], 3), chord_pad([293.7, 349.2, 440.0], 3),
+                                  chord_pad([329.6, 415.3, 493.9], 2), chord_pad([220.0, 261.6, 329.6], 4)])
+        self.assertEqual(vv.estimate_key(a_minor, SR), "A minor")
+
+    def test_language_guess(self):
+        self.assertEqual(vv.guess_language("Ночь моя неоновая"), "ru")
+        self.assertEqual(vv.guess_language("Їжак і ґанок"), "uk")
+        self.assertEqual(vv.guess_language("Neon night"), "en")
+
+
 class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="vv-"))
@@ -199,6 +240,46 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("'semi_tone_shift': '12'", args)
         self.assertIn("'f0_condition': 'True'", args)
         self.assertIn("'auto_f0_adjust': 'False'", args)
+
+    def test_analyze_song(self):
+        words = [{"w": "Ночь", "s": 1.0, "e": 1.4}, {"w": "моя", "s": 1.5, "e": 1.9}]
+        fake = self.tmp / "words.json"
+        fake.write_text(json.dumps({"words": words}, ensure_ascii=False), encoding="utf-8")
+        out = self.tmp / "song1"
+        code, ev, err = run_worker("analyze", "--input", self.song, "--out", str(out), "--separator-cmd", self.sep_cmd,
+                                   "--asr-fake", str(fake))
+        self.assertEqual(code, 0, err + str(ev[-1:]))
+        res = ev[-1]["result"]
+        self.assertEqual(res["words"], words)
+        self.assertEqual(res["language"], "ru")
+        self.assertAlmostEqual(res["f0Median"], 196 * 1.03, delta=12)
+        self.assertGreater(res["duration"], 30)
+        self.assertTrue((out / "vocals.wav").is_file() and (out / "instrumental.wav").is_file())
+        self.assertFalse((out / ".work").exists())
+        stages = [e["name"] for e in ev if e["event"] == "stage"]
+        self.assertEqual(stages, ["separate", "music", "transcribe"])
+
+    def test_analyze_rejects_short_file(self):
+        short = vv.write_audio(self.tmp / "short.wav", tone(200, 3), SR)
+        code, ev, _ = run_worker("analyze", "--input", short, "--out", str(self.tmp / "s"), "--separator-cmd", self.sep_cmd)
+        self.assertEqual(code, 2)
+        self.assertIn("короткий", ev[-1]["message"])
+
+    def test_overlay_on_original_instrumental(self):
+        inst = vv.write_audio(self.tmp / "inst.wav", np.stack([tone(110, 40)] * 2, axis=1) * 0.3, SR)
+        orig = vv.write_audio(self.tmp / "orig_voc.wav", np.stack([tone(220, 40)] * 2, axis=1) * 0.5, SR)
+        ace = vv.write_audio(self.tmp / "ace.wav", np.stack([tone(330, 38)] * 2, axis=1) * 0.5, SR)
+        ref = vv.write_audio(self.tmp / "ref.wav", tone(196, 5), SR)
+        for with_voice in (False, True):
+            out = self.tmp / f"ov{int(with_voice)}.wav"
+            extra = ["--reference", ref, "--seedvc", str(self.seed), "--seedvc-python", sys.executable, "--target-f0", "196"] if with_voice else []
+            code, ev, err = run_worker("overlay", "--input", ace, "--instrumental", inst, "--orig-vocals", orig, "--out", str(out),
+                                       "--work", str(self.tmp / f"w{int(with_voice)}"), "--separator-cmd", self.sep_cmd, "--format", "wav", *extra)
+            self.assertEqual(code, 0, err + str(ev[-1:]))
+            data, _ = vv.read_audio(ev[-1]["result"]["output"])
+            self.assertEqual(len(data), int(40 * SR), "длина — как у исходного минуса")
+            stages = [e["name"] for e in ev if e["event"] == "stage"]
+            self.assertEqual("convert" in stages, with_voice)
 
     def test_export_import(self):
         vd = self.tmp / "voiceX"

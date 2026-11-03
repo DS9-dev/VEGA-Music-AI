@@ -34,6 +34,14 @@ export function findVoiceTools(appRoot: string) {
   };
 }
 
+/** Папка моделей распознавания (Whisper): рядом с другими моделями, если они есть. */
+export function findAsrModels(appRoot: string): string {
+  const parent = dirname(appRoot);
+  const roots = [join(parent, 'VEGA_Music'), 'T:\\VEGA_Music', 'D:\\AI', 'C:\\AI'];
+  const models = roots.map((r) => join(r, 'Models')).find((m) => existsSync(m));
+  return models ? join(models, 'ASR') : join(appRoot, 'Models', 'ASR');
+}
+
 export function defaultSettings(appRoot: string): Settings {
   return {
     aceEndpoint: 'http://127.0.0.1:8001',
@@ -56,6 +64,12 @@ export function defaultSettings(appRoot: string): Settings {
     voicesPath: join(appRoot, 'Voices'),
     voiceDiffusionSteps: 30,
     freeAceForVoice: true,
+    songsPath: join(appRoot, 'Songs'),
+    asrBackend: 'auto',
+    asrModel: 'large-v3',
+    asrModelsPath: findAsrModels(appRoot),
+    songLlmCleanup: true,
+    aceBaseModel: 'acestep-v15-base',
   };
 }
 

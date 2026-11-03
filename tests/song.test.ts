@@ -1,0 +1,172 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DEFAULT_PARAMS } from '../src/shared/catalog';
+import {
+  applyCleanup, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
+  sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
+} from '../src/shared/song';
+import type { Song, SongWord } from '../src/shared/types';
+
+/** Синтетическая «распознанная» песня: строки по 4 с, паузы между блоками. */
+function fakeWords(blocks: { at: number; lines: string[] }[]): SongWord[] {
+  const words: SongWord[] = [];
+  for (const b of blocks) {
+    b.lines.forEach((line, li) => {
+      const start = b.at + li * 4;
+      const ws = line.split(' ');
+      ws.forEach((w, wi) => {
+        const s = start + (wi * 3.2) / ws.length;
+        words.push({ w, s, e: s + 3.0 / ws.length });
+      });
+    });
+  }
+  return words;
+}
+
+const V1 = ['Город спит под тёплым дождём', 'Фонари горят за окном', 'Я иду по мокрой мостовой', 'Ветер шепчет мне домой'];
+const CH = ['Ночь моя неоновая ночь', 'Унеси печали прочь', 'Ночь моя неоновая ночь', 'Никому не превозмочь'];
+const V2 = ['Утро где-то там вдали', 'Тают в лужах корабли', 'Шум машин и стук сердец', 'Это вовсе не конец'];
+const BR = ['Тишина и только свет', 'Только свет и больше нет'];
+
+function song(): { words: SongWord[]; duration: number } {
+  return {
+    words: fakeWords([
+      { at: 12, lines: V1 },
+      { at: 32, lines: CH },
+      { at: 52, lines: V2 },
+      { at: 72, lines: CH.map((l, i) => (i === 3 ? 'Никому не превозмочь бы' : l)) }, // распознано чуть иначе
+      { at: 100, lines: BR },
+      { at: 112, lines: CH },
+    ]),
+    duration: 140,
+  };
+}
+
+test('слова → строки: по паузам, с заглавной буквы', () => {
+  const { words } = song();
+  const lines = buildLines(words, 120);
+  assert.equal(lines.length, 22);
+  assert.equal(lines[0].text, 'Город спит под тёплым дождём');
+  assert.ok(lines[0].start >= 12 && lines[0].end <= 16);
+});
+
+test('галлюцинации Whisper отбрасываются', () => {
+  const lines = buildLines([{ w: 'Продолжение', s: 1, e: 1.5 }, { w: 'следует...', s: 1.5, e: 2 }, { w: 'Привет', s: 10, e: 10.5 }], 120);
+  assert.deepEqual(lines.map((l) => l.text), ['Привет']);
+});
+
+test('секции: интро, куплеты, повторяющийся припев, бридж, проигрыш, аутро', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const tags = sections.map((s) => s.tag);
+  assert.deepEqual(tags, ['Intro', 'Verse 1', 'Chorus', 'Verse 2', 'Chorus', 'Instrumental', 'Bridge', 'Chorus', 'Outro']);
+  const ch = sections.filter((s) => s.tag === 'Chorus');
+  assert.ok(ch.every((c) => c.group && c.group === ch[0].group), 'припевы в одной группе');
+  const text = sectionsToLyrics(sections);
+  assert.match(text, /^\[Intro\]\n\n\[Verse 1\]\nГород спит/);
+});
+
+test('похожесть строк устойчива к мелким ошибкам распознавания', () => {
+  assert.ok(lineSimilarity('Ночь моя неоновая ночь', 'ночь моя неоновая ночь!') === 1);
+  assert.ok(lineSimilarity('Никому не превозмочь', 'Никому не превозмочь бы') > 0.8);
+  assert.ok(lineSimilarity('Город спит под дождём', 'Утро где-то там вдали') < 0.3);
+});
+
+test('исправление моделью: строки заменяются только при совпадении числа строк, теги перенумеровываются', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const answer = [
+    '#1 [Verse]', ...V1.map((l) => l.replace('дождём', 'дождем')),
+    '#2 [Chorus]', ...CH,
+    '#3 [Verse]', 'всего одна строка',
+    '#4 [Chorus]', ...CH,
+    '#5 [Bridge]', ...BR,
+    '#6 [Chorus]', ...CH,
+  ].join('\n');
+  const r = applyCleanup(sections, `<think>хм</think>${answer}`);
+  assert.equal(r.fixedBlocks, 5);
+  const voc = r.sections.filter((s) => s.kind === 'vocal');
+  assert.equal(voc[0].lines[0].text, 'Город спит под тёплым дождем');
+  assert.equal(voc[2].lines.length, 4, 'блок с другим числом строк не тронут');
+  assert.deepEqual(voc.map((s) => s.tag), ['Verse 1', 'Chorus', 'Verse 2', 'Chorus', 'Bridge', 'Chorus']);
+  assert.equal(voc[3].lines[3].text, 'Никому не превозмочь');
+});
+
+test('бюджет слогов: по оригиналу секции, пропуски распознавания добираются по плотности', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const b = sectionBudgets(sections);
+  assert.equal(b.length, 6);
+  assert.equal(b[0].target, b[0].original);
+  assert.ok(b[0].target >= 28 && b[0].target <= 36, `target=${b[0].target}`);
+  // если секция распознана почти пустой — целевой бюджет по средней плотности
+  const sparse = sections.map((s) => (s.tag === 'Verse 2' ? { ...s, lines: [s.lines[0]] } : s));
+  const b2 = sectionBudgets(sparse);
+  assert.ok(b2[2].target > b2[2].original * 2);
+});
+
+test('переписывание: уникальные части, разбор ответа, проверка бюджета и сборка с повтором припева', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const parts = uniqueParts(sections);
+  assert.deepEqual(parts.map((p) => p.name), ['Verse 1', 'Chorus', 'Verse 2', 'Bridge']);
+  assert.equal(parts[1].repeats, 3);
+  const raw = [
+    'TITLE: Северный ветер',
+    '[Verse 1]', 'Снег ложится на поля', 'Тихо дремлет вся земля', 'Я шагаю в белый день', 'За спиной плывёт метель',
+    '[Chorus] — hook', 'Ветер мой холодный ветер', 'Самый лучший он на свете', 'Ветер мой холодный ветер', 'Нас найдёт и на рассвете',
+    'Verse 2:', 'Лёд звенит на реке', 'Огонёк вдалеке', 'Дом стоит на горе', 'Свет в узорном окне',
+  ].join('\n');
+  const parsed = parseRewrite(raw, parts);
+  assert.equal(parsed.title, 'Северный ветер');
+  assert.equal(parsed.parts.size, 3);
+  const checks = checkRewrite(parts, parsed);
+  assert.equal(checks.find((c) => c.part.name === 'Bridge')!.actual, 0);
+  assert.equal(checks.find((c) => c.part.name === 'Bridge')!.level, 'bad');
+  const out = assembleRewrite(sections, parts, parsed);
+  assert.deepEqual(out.missing, ['Bridge']);
+  assert.equal(out.text.match(/Ветер мой холодный ветер/g)!.length, 6, 'припев трижды, по 2 раза в каждом');
+  assert.match(out.text, /\[Instrumental\]/);
+  const m = measureBudgets(sectionBudgets(sections), out.text);
+  assert.ok(m[0].actual! > 20);
+});
+
+test('правки текста переносятся на секции с таймингом', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const edited = sectionsToLyrics(sections).replace('Город спит под тёплым дождём', 'Город спит под летним дождём');
+  const s2 = sectionsWithText(sections, edited);
+  assert.equal(s2[1].lines[0].text, 'Город спит под летним дождём');
+  assert.equal(s2[1].lines[0].start, sections[1].lines[0].start);
+});
+
+test('песня → параметры трека и участок перепевки', () => {
+  const { words, duration } = song();
+  const sections = buildSections(buildLines(words, 120), duration, 120);
+  const s: Song = {
+    id: 'x', title: 'T', createdAt: '', status: 'ready', sourceName: 'a.mp3', source: 'source.mp3', duration: 141.3, bpm: 119.6, key: 'A minor',
+    gender: 'female', language: 'ru', sections, lyrics: '', warnings: [],
+  };
+  const p = songTrackParams(s, DEFAULT_PARAMS);
+  assert.equal(p.duration, 140);
+  assert.equal(p.bpm, 120);
+  assert.equal(p.key, 'A minor');
+  assert.equal(p.voice, 'female');
+  assert.equal(p.sourceSongId, 'x');
+  const span = vocalSpan(s);
+  assert.ok(span.start > 11 && span.start < 12);
+  assert.ok(span.end > 127 && span.end <= 141.3);
+});
+
+test('куплет без паузы переходит в припев — блок разрезается по повторяющимся строкам', () => {
+  const words = fakeWords([
+    { at: 10, lines: [...V1, ...CH] }, // ни одной паузы между куплетом и припевом
+    { at: 50, lines: [...V2, ...CH] },
+    { at: 92, lines: CH },
+  ]);
+  const sections = buildSections(buildLines(words, 118), 120, 118);
+  const voc = sections.filter((s) => s.kind === 'vocal');
+  assert.deepEqual(voc.map((s) => s.tag), ['Verse 1', 'Chorus', 'Verse 2', 'Chorus', 'Chorus']);
+  assert.equal(voc[0].lines.length, 4);
+  assert.equal(voc[1].lines[0].text, CH[0]);
+});

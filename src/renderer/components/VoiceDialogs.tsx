@@ -35,11 +35,15 @@ export const PROFILES: { id: VoiceTrainProfile; title: string; desc: string; rec
 
 function base(p: string) { return p.split(/[\\/]/).pop() ?? p; }
 
-export function NewVoiceDialog(props: { onClose: () => void; onStarted: () => void }) {
+export function NewVoiceDialog(props: {
+  onClose: () => void;
+  onStarted: () => void;
+  initial?: { name: string; gender: VoiceGender; sources: { path: string; kind: VoiceSourceKind }[]; note?: string };
+}) {
   const toast = useToast();
-  const [name, setName] = useState('');
-  const [gender, setGender] = useState<VoiceGender>('male');
-  const [sources, setSources] = useState<{ path: string; kind: VoiceSourceKind }[]>([]);
+  const [name, setName] = useState(props.initial?.name ?? '');
+  const [gender, setGender] = useState<VoiceGender>(props.initial?.gender ?? 'male');
+  const [sources, setSources] = useState<{ path: string; kind: VoiceSourceKind }[]>(props.initial?.sources ?? []);
   const [profile, setProfile] = useState<VoiceTrainProfile>('standard');
   const [consent, setConsent] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -62,7 +66,7 @@ export function NewVoiceDialog(props: { onClose: () => void; onStarted: () => vo
   };
 
   return (
-    <Modal title="Новый голос" onClose={props.onClose} footer={<>
+    <Modal title={props.initial ? 'Голос из песни' : 'Новый голос'} onClose={props.onClose} footer={<>
       <span className="hint">{sources.length ? `${sources.length} ${sources.length === 1 ? 'файл' : 'файла(ов)'} · вокал выделится автоматически` : 'Нужна хотя бы одна песня'}</span>
       <button className="btn ghost" onClick={props.onClose}>Отмена</button>
       <button className="btn primary" disabled={!valid || busy} onClick={create}><IcMic size={16} /> Создать голос</button>
@@ -81,6 +85,7 @@ export function NewVoiceDialog(props: { onClose: () => void; onStarted: () => vo
         </div>
       </div>
 
+      {props.initial?.note && <div className="plan-line" style={{ marginTop: 14 }}>{props.initial.note}</div>}
       <div className="field">
         <div className="label">Песни или записи голоса</div>
         <div className="src-list">

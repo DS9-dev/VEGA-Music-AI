@@ -2,7 +2,45 @@
 import type { MusicApi } from '../shared/api';
 import { buildCaption } from '../shared/caption';
 import { assembleLyrics, parseLlmLyrics, planStructure } from '../shared/lyrics';
-import type { JobState, LyricsChunk, Settings, Track, TrackParams, VoiceItem } from '../shared/types';
+import { assembleRewrite, buildLines, buildSections, parseRewrite, sectionsToLyrics, songTrackParams, uniqueParts } from '../shared/song';
+import { DEFAULT_PARAMS } from '../shared/catalog';
+import type { JobState, LyricsChunk, Settings, SongItem, SongWord, Track, TrackParams, VoiceItem } from '../shared/types';
+
+// ───── демо-песня (собственный текст) ─────
+const D_V1 = ['Фары режут темноту', 'Я держу свою мечту', 'Километры за спиной', 'Ветер гонит нас домой'];
+const D_C = ['Ночная трасса, гори огнями', 'Мы снова мчимся за облаками', 'Ночная трасса, не отпускай', 'Веди до утра через самый край'];
+const D_V2 = ['Спят посёлки у дорог', 'Каждый поворот — пролог', 'Радио поёт о нас', 'Будто бы в последний раз'];
+const D_B = ['Если свет погаснет вдруг', 'Я найду тебя, мой друг'];
+const R_RAW = ['TITLE: Земля родная',
+  '[Verse 1]', 'Звёзды гаснут за стеклом', 'Я лечу в свой старый дом', 'Сотни дней в пустой ночи', 'Сердце, громче застучи',
+  '[Chorus]', 'Земля родная, зажги огни', 'Мы возвращаемся в эти дни', 'Земля родная, не отпускай', 'Встречай с рассвета, мой синий край',
+  '[Verse 2]', 'Тишина в моём шлеме', 'Время спит в своём плене', 'Голос диспетчера звучит', 'И над планетой свет горит',
+  '[Bridge]', 'Если связь умолкнет вдруг', 'Я вернусь в твой тёплый круг'].join('\n');
+
+function demoWords(): SongWord[] {
+  const words: SongWord[] = [];
+  const blocks: [number, string[]][] = [[14, D_V1], [32, D_C], [52, D_V2], [70, D_C], [96, D_B], [108, D_C]];
+  for (const [at, lines] of blocks) lines.forEach((line, li) => {
+    const ws = line.split(' ');
+    ws.forEach((w, wi) => { const st = at + li * 4 + (wi * 3.2) / ws.length; words.push({ w, s: st, e: st + 3 / ws.length }); });
+  });
+  return words;
+}
+
+function demoSong(id: string, title: string, withRewrite: boolean, ageH: number): SongItem {
+  const sections = buildSections(buildLines(demoWords(), 118), 138, 118);
+  const lyrics = sectionsToLyrics(sections);
+  const parts = uniqueParts(sections);
+  const rw = assembleRewrite(sections, parts, parseRewrite(R_RAW, parts));
+  return {
+    id, title, createdAt: new Date(Date.now() - ageH * 3600e3).toISOString(), status: 'ready', sourceName: `${title}.mp3`, source: 'source.mp3',
+    vocals: 'vocals.wav', instrumental: 'instrumental.wav', duration: 138, bpm: 118, key: 'A minor', gender: 'male', f0Median: 152, note: 'D3', language: 'ru',
+    sections, lyrics, recognized: lyrics, warnings: [],
+    caption: withRewrite ? 'driving synthwave rock, pulsing bass, bright analog synth leads, punchy drums, nostalgic night-drive mood' : undefined,
+    rewrite: withRewrite ? { theme: 'Космонавт возвращается домой после долгой экспедиции', title: 'Земля родная', text: rw.text, createdAt: new Date().toISOString() } : undefined,
+    paths: { source: `D:\\VEGA-Music-AI\\Songs\\${id}\\source.mp3`, vocals: `D:\\VEGA-Music-AI\\Songs\\${id}\\vocals.wav`, instrumental: `D:\\VEGA-Music-AI\\Songs\\${id}\\instrumental.wav` },
+  };
+}
 
 const SONG: Record<string, string[]> = {
   V1: ['Дождь стучит по крышам до утра', 'Город в неоне не знает сна', 'Фары режут мокрую тьму', 'Я лечу навстречу ему',
@@ -56,11 +94,16 @@ export function installDemoApi() {
     libraryPath: 'D:\\VEGA-Music-AI\\Library', calibration: { '1': 0.55, '2': 0.72, overhead: 12 },
     seedvcPath: 'D:\\AI\\Seed-VC', separatorPath: 'D:\\AI\\StemSeparator', melbandModelsPath: 'D:\\AI\\StemSeparator\\models',
     transformersCachePath: '', voicesPath: 'D:\\VEGA-Music-AI\\Voices', voiceDiffusionSteps: 30, freeAceForVoice: true,
+    songsPath: 'D:\\VEGA-Music-AI\\Songs', asrBackend: 'auto', asrModel: 'large-v3', asrModelsPath: 'D:\\AI\\Models\\ASR', songLlmCleanup: true,
+    aceBaseModel: 'acestep-v15-base',
   };
+  const params0 = new URLSearchParams(location.search);
+  const songs: SongItem[] = params0.get('songs') === '0' ? [] : [demoSong('night', 'Ночная трасса', params0.get('rewrite') !== '0', 3), demoSong('rain', 'Летний ливень', false, 30)];
+  const songChunkSubs = new Set<(c: LyricsChunk) => void>();
   const base: TrackParams = {
     theme: 'Ночной курьер мчится сквозь неоновый город под ливнем, чтобы успеть до рассвета', genres: ['Рок', 'Синтвейв'], moods: ['Энергичное'], instrumental: false, matureDark: false,
     voice: 'male', timbre: 'baritone', language: 'ru', duration: 220, bpm: null, key: null, density: 'normal', variants: 2, seedLocked: false, seed: 42, sound: '', allowBacking: false,
-    voiceId: null, voiceShift: null,
+    voiceId: null, voiceShift: null, sourceSongId: null, cover: false, coverStrength: 0.5,
   };
   const H = 3600e3;
   const tracks: Track[] = [
@@ -173,7 +216,7 @@ export function installDemoApi() {
       readAudio: async () => synthWav(),
       exportVoice: async (id) => `D:\\${voices.find((x) => x.id === id)?.name}.vegavoice`,
       importVoice: async () => null,
-      check: async () => ({ ok: true, problems: [], cuda: true, python: '3.10.11' }),
+      check: async () => ({ ok: true, problems: [], cuda: true, python: '3.10.11', asr: 'faster-whisper' }),
       revoice: async (trackId, variant, voiceId) => {
         const t = tracks.find((x) => x.id === trackId)!;
         const v = voices.find((x) => x.id === voiceId)!;
@@ -184,6 +227,70 @@ export function installDemoApi() {
           return { trackId: nt.id, detail: 'Трек сохранён в библиотеку' };
         });
         void variant;
+        return 'demo';
+      },
+      openRoot: async () => {},
+    },
+    songs: {
+      list: async () => songs.map((x) => ({ ...x })),
+      pick: async () => 'D:\\Music\\Ночная трасса.mp3',
+      importSong: async (spec) => {
+        const id = 's' + Date.now();
+        const title = spec.path.split(/[\\/]/).pop()!.replace(/\.[^.]+$/, '');
+        songs.unshift({ ...demoSong(id, title, false, 0), status: 'analyzing', sections: [], lyrics: '' });
+        void simulate('song', title, ['Вокал', 'Текст', 'Структура', 'Готово'], [
+          [0, 'Выделение вокала', 'Отделяем голос от музыки'], [0, 'Темп и тональность', 'Определяем темп и тональность'],
+          [1, 'Распознавание слов', 'Распознаём слова · 1:12 из 2:18'], [2, 'Структура', 'Исправляем распознанный текст моделью…']], 16, () => {
+          const i = songs.findIndex((x) => x.id === id);
+          songs[i] = demoSong(id, title, false, 0);
+          return { detail: '22 строки · 6 секций · 118 BPM · A minor' };
+        }, id);
+        return id;
+      },
+      update: async (id, patch) => {
+        const i = songs.findIndex((x) => x.id === id);
+        songs[i] = { ...songs[i], ...patch, rewrite: patch.rewrite === null ? undefined : patch.rewrite ?? songs[i].rewrite } as SongItem;
+        return songs[i];
+      },
+      remove: async (id) => { const i = songs.findIndex((x) => x.id === id); if (i >= 0) songs.splice(i, 1); },
+      reveal: async () => {},
+      readAudio: async () => synthWav(),
+      rewrite: async (id, spec) => {
+        cancelled = false;
+        const x = songs.find((q) => q.id === id)!;
+        const parts = uniqueParts(x.sections);
+        const parsed = parseRewrite(R_RAW, parts);
+        const full = assembleRewrite(x.sections, parts, parsed).text;
+        songChunkSubs.forEach((f) => f({ text: '', thinking: true }));
+        await sleep(1200 / speed);
+        for (let i = 0; i <= full.length; i += 5) {
+          if (cancelled) throw new Error('aborted');
+          songChunkSubs.forEach((f) => f({ text: full.slice(0, i), thinking: false }));
+          await sleep(22 / speed);
+        }
+        x.rewrite = { theme: spec.theme, title: 'Земля родная', text: full, matureDark: spec.matureDark, createdAt: new Date().toISOString() };
+        return { title: 'Земля родная', text: full, warnings: [], checks: [] };
+      },
+      cancelRewrite: async () => { cancelled = true; },
+      onChunk: (cb) => { songChunkSubs.add(cb); return () => songChunkSubs.delete(cb); },
+      cleanup: async (id) => { await sleep(1500); return songs.find((x) => x.id === id)!; },
+      analyzeStyle: async (id) => {
+        await sleep(2500);
+        const x = songs.find((q) => q.id === id)!;
+        x.caption = 'driving synthwave rock, pulsing bass, bright analog synth leads, punchy drums, nostalgic night-drive mood';
+        return x;
+      },
+      remake: async (spec) => {
+        const x = songs.find((q) => q.id === spec.songId)!;
+        void simulate('remake', spec.title, ['Подготовка', 'Музыка', 'Вокал', 'Сведение', 'Сохранение'], [
+          [1, 'Музыка', 'ACE-Step перепевает участок с вокалом'], [1, 'Музыка', 'ACE-Step перепевает участок с вокалом'],
+          [2, 'Вокал', 'Выделяем новый вокал'], [3, 'Сведение', 'Сводим новый вокал с исходной музыкой']], 22, () => {
+          const t: Track = { id: 'rm' + Date.now(), title: spec.title, createdAt: new Date().toISOString(), params: { ...songTrackParams(x, DEFAULT_PARAMS), genres: ['Синтвейв', 'Рок'] },
+            lyrics: spec.text, caption: x.caption ?? '', bpm: x.bpm ?? 0, generationSeconds: 96, voiceName: spec.voiceId ? voices.find((v) => v.id === spec.voiceId)?.name : undefined,
+            variants: [{ file: 'variant-1.mp3', label: 'Вариант 1' }, ...(spec.keepAce ? [{ file: 'variant-1-ace.mp3', label: 'Вариант 1 · ACE', original: true }] : [])] };
+          tracks.unshift(t);
+          return { trackId: t.id, detail: 'Новый вокал сведён с исходной музыкой' };
+        }, spec.songId);
         return 'demo';
       },
       openRoot: async () => {},

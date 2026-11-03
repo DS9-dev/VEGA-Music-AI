@@ -12,8 +12,11 @@ VEGA-Music-AI · обработчик голоса.
   export   — упаковка голоса в один файл .vegavoice
   import   — распаковка .vegavoice
   check    — проверка установленных компонентов
+  analyze  — разбор песни (V3): вокал и минус, распознавание слов (Whisper), темп, тональность, высота голоса
+  overlay  — новый вокал на родной минус (V3): вокал из результата ACE-Step (+ голос Seed-VC) → сведение с минусом
 
 Зависимости самого скрипта: numpy, scipy (+ soundfile для mp3/flac). Всё это есть в окружении Seed-VC.
+Для analyze дополнительно нужен faster-whisper (pip install faster-whisper) или transformers (уже есть в Seed-VC).
 """
 from __future__ import annotations
 
@@ -572,6 +575,326 @@ def cmd_apply(args) -> dict:
     return {"output": result, "semitones": semis}
 
 
+# ───────────────────────── analyze (песня → текст и параметры) ─────────────────────────
+
+KEY_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+# профили Крумхансла — Кесслер
+MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+
+def _stft_mag(y: np.ndarray, frame: int, hop: int, max_frames: int = 20000) -> np.ndarray:
+    if len(y) < frame:
+        y = np.pad(y, (0, frame - len(y)))
+    n = 1 + (len(y) - frame) // hop
+    n = min(n, max_frames)
+    win = np.hanning(frame).astype(np.float32)
+    out = np.empty((n, frame // 2 + 1), dtype=np.float32)
+    for i0 in range(0, n, 512):
+        i1 = min(n, i0 + 512)
+        idx = np.arange(frame)[None, :] + hop * np.arange(i0, i1)[:, None]
+        out[i0:i1] = np.abs(np.fft.rfft(y[idx] * win, axis=1))
+    return out
+
+
+def estimate_bpm(x: np.ndarray, sr: int, max_sec: float = 150.0) -> float | None:
+    """Темп по автокорреляции огибающей атак (спектральный поток), с приоритетом 70–170 BPM."""
+    y = resample(x[: int(sr * max_sec)], sr, 11025)
+    if len(y) < 11025 * 6:
+        return None
+    sr2, frame, hop = 11025, 1024, 256
+    fps = sr2 / hop
+    mag = np.log1p(100.0 * _stft_mag(y, frame, hop))
+    flux = np.maximum(0.0, np.diff(mag, axis=0)).sum(axis=1)
+    if flux.size < 64 or float(flux.max()) <= 0:
+        return None
+    k = max(1, int(fps * 0.5))
+    smooth = np.convolve(flux, np.ones(k) / k, mode="same")
+    onset = np.maximum(0.0, flux - smooth)
+    onset -= onset.mean()
+    spec = np.fft.rfft(onset, 2 * len(onset))
+    ac = np.fft.irfft(np.abs(spec) ** 2)[: len(onset)]
+    if ac[0] <= 0:
+        return None
+    ac /= ac[0]
+
+    def at(lag: float) -> float:
+        if lag >= len(ac) - 1 or lag < 1:
+            return 0.0
+        i = int(lag)
+        f = lag - i
+        return float(ac[i] * (1 - f) + ac[i + 1] * f)
+
+    best, best_score = None, -1e9
+    for bpm in np.arange(60.0, 200.0, 0.25):
+        lag = 60.0 * fps / bpm
+        score = at(lag) + 0.5 * at(2 * lag) + 0.25 * at(4 * lag)
+        prior = math.exp(-0.5 * (math.log2(bpm / 118.0) / 0.75) ** 2)
+        score *= prior
+        if score > best_score:
+            best, best_score = float(bpm), score
+    return round(best, 1) if best else None
+
+
+def estimate_key(x: np.ndarray, sr: int, max_sec: float = 150.0) -> str | None:
+    """Тональность: хромаграмма по спектру + корреляция с профилями мажора/минора."""
+    y = resample(x[: int(sr * max_sec)], sr, 11025)
+    if len(y) < 11025 * 4:
+        return None
+    frame, hop = 4096, 2048
+    mag = _stft_mag(y, frame, hop)
+    freqs = np.fft.rfftfreq(frame, 1.0 / 11025)
+    sel = (freqs > 60) & (freqs < 2100)
+    midi = 69 + 12 * np.log2(freqs[sel] / 440.0)
+    pc = np.mod(np.round(midi), 12).astype(int)
+    energy = (mag[:, sel] ** 2).sum(axis=0)
+    chroma = np.bincount(pc, weights=energy, minlength=12)
+    if chroma.sum() <= 0:
+        return None
+    chroma = chroma / chroma.max()
+    best, best_r = None, -2.0
+    for tonic in range(12):
+        for name, prof in (("major", MAJOR_PROFILE), ("minor", MINOR_PROFILE)):
+            r = float(np.corrcoef(chroma, np.roll(prof, tonic))[0, 1])
+            if r > best_r:
+                best, best_r = f"{KEY_NAMES[tonic]} {name}", r
+    return best
+
+
+def guess_language(text: str) -> str:
+    if re.search(r"[іїєґІЇЄҐ]", text):
+        return "uk"
+    if re.search(r"[а-яА-ЯёЁ]", text):
+        return "ru"
+    if re.search(r"[぀-ヿ]", text):
+        return "ja"
+    if re.search(r"[가-힯]", text):
+        return "ko"
+    if re.search(r"[一-鿿]", text):
+        return "zh"
+    return "en"
+
+
+def _torch_dll_dirs() -> None:
+    """На Windows ctranslate2 (faster-whisper) находит CUDA-библиотеки из папки torch."""
+    if os.name != "nt":
+        return
+    try:
+        import torch  # type: ignore
+        lib = Path(torch.__file__).parent / "lib"
+        if lib.is_dir():
+            os.add_dll_directory(str(lib))  # type: ignore[attr-defined]
+            os.environ["PATH"] = str(lib) + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
+
+
+def _cuda() -> bool:
+    try:
+        import torch  # type: ignore
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
+def asr_available() -> str | None:
+    try:
+        import faster_whisper  # type: ignore  # noqa: F401
+        return "faster-whisper"
+    except Exception:
+        pass
+    try:
+        import transformers  # type: ignore  # noqa: F401
+        return "transformers"
+    except Exception:
+        return None
+
+
+def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float) -> tuple[list[dict], str]:
+    _torch_dll_dirs()
+    from faster_whisper import WhisperModel  # type: ignore
+    root = args.asr_models or None
+    if root:
+        Path(root).mkdir(parents=True, exist_ok=True)
+    device = "cuda" if _cuda() else "cpu"
+    try:
+        model = WhisperModel(args.asr_model, device=device, compute_type="float16" if device == "cuda" else "int8", download_root=root)
+    except Exception as e:  # нет cuDNN/cuBLAS — работаем на процессоре
+        if device != "cuda":
+            raise
+        emit("log", text=f"Whisper на видеокарте не запустился ({e}), распознаю на процессоре — будет медленнее")
+        device = "cpu"
+        model = WhisperModel(args.asr_model, device="cpu", compute_type="int8", download_root=root)
+    lang = None if args.language in ("", "auto") else args.language
+
+    def run(vad: bool):
+        segments, info = model.transcribe(
+            audio16, language=lang, task="transcribe", beam_size=5, word_timestamps=True,
+            vad_filter=vad, vad_parameters={"min_silence_duration_ms": 700, "speech_pad_ms": 300, "threshold": 0.3} if vad else None,
+            condition_on_previous_text=False, no_speech_threshold=0.6, compression_ratio_threshold=2.4,
+            temperature=[0.0, 0.2, 0.4],
+        )
+        words: list[dict] = []
+        for seg in segments:
+            for w in seg.words or []:
+                t = (w.word or "").strip()
+                if t:
+                    words.append({"w": t, "s": round(float(w.start), 2), "e": round(float(w.end), 2)})
+            progress(0.45 + 0.5 * min(1.0, float(seg.end) / max(1.0, duration)), f"Распознаём слова · {fmt_time(seg.end)} из {fmt_time(duration)}")
+        return words, info.language
+
+    try:
+        words, detected = run(True)
+        if not words:
+            words, detected = run(False)
+    except RuntimeError as e:
+        if device == "cuda" and re.search(r"cudnn|cublas|cuda", str(e), re.I):
+            emit("log", text=f"Ошибка CUDA в Whisper ({e}), повторяю на процессоре")
+            model = WhisperModel(args.asr_model, device="cpu", compute_type="int8", download_root=root)
+            words, detected = run(True)
+        else:
+            raise
+    return words, (lang or detected or "")
+
+
+def transcribe_transformers(audio16: np.ndarray, args, duration: float) -> tuple[list[dict], str]:
+    import torch  # type: ignore
+    from transformers import pipeline  # type: ignore
+    name = args.asr_model if "/" in args.asr_model else f"openai/whisper-{args.asr_model}"
+    cuda = _cuda()
+    kw = {"cache_dir": args.asr_models} if args.asr_models else {}
+    pipe = pipeline("automatic-speech-recognition", model=name, torch_dtype=torch.float16 if cuda else torch.float32,
+                    device=0 if cuda else -1, model_kwargs=kw)
+    lang = None if args.language in ("", "auto") else args.language
+    gen = {"task": "transcribe"}
+    if lang:
+        gen["language"] = lang
+    words: list[dict] = []
+    chunk = 30 * 16000
+    for i0 in range(0, len(audio16), chunk):
+        part = audio16[i0:i0 + chunk]
+        if rms_db(part) < -50:
+            continue
+        out = pipe({"raw": part, "sampling_rate": 16000}, return_timestamps="word", generate_kwargs=gen)
+        off = i0 / 16000
+        for c in out.get("chunks", []):
+            ts = c.get("timestamp") or (None, None)
+            t = (c.get("text") or "").strip()
+            if not t or ts[0] is None:
+                continue
+            s = float(ts[0]) + off
+            e = float(ts[1]) + off if ts[1] is not None else s + 0.3
+            words.append({"w": t, "s": round(s, 2), "e": round(e, 2)})
+        progress(0.45 + 0.5 * min(1.0, (i0 + chunk) / max(1, len(audio16))), f"Распознаём слова · {fmt_time((i0 + chunk) / 16000)} из {fmt_time(duration)}")
+    text = " ".join(w["w"] for w in words)
+    return words, (lang or guess_language(text))
+
+
+def fmt_time(sec: float) -> str:
+    sec = max(0, int(round(sec)))
+    return f"{sec // 60}:{sec % 60:02d}"
+
+
+def transcribe(vocals: str, args, duration: float) -> tuple[list[dict], str, str]:
+    fake = args.asr_fake or os.environ.get("VEGA_ASR_FAKE", "")  # для тестов
+    if fake:
+        data = json.loads(Path(fake).read_text(encoding="utf-8"))
+        progress(0.9, "Распознаём слова")
+        words = data["words"] if isinstance(data, dict) else data
+        lang = (data.get("language") if isinstance(data, dict) else None) or guess_language(" ".join(w["w"] for w in words))
+        return words, lang, "fake"
+    v, vsr = read_audio(vocals)
+    audio16 = resample(to_mono(v), vsr, 16000).astype(np.float32)
+    backend = args.asr_backend
+    if backend in ("auto", "faster-whisper"):
+        try:
+            import faster_whisper  # type: ignore  # noqa: F401
+            words, lang = transcribe_faster_whisper(audio16, args, duration)
+            return words, lang, "faster-whisper"
+        except ImportError:
+            if backend == "faster-whisper":
+                raise WorkerError("Не установлен faster-whisper. Установите его в окружение Seed-VC: .venv\\Scripts\\pip install faster-whisper")
+    try:
+        import transformers  # type: ignore  # noqa: F401
+    except ImportError:
+        raise WorkerError("Нет модуля распознавания речи. Установите faster-whisper в окружение Seed-VC: .venv\\Scripts\\pip install faster-whisper")
+    words, lang = transcribe_transformers(audio16, args, duration)
+    return words, lang, "transformers"
+
+
+def cmd_analyze(args) -> dict:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    work = out / ".work"
+    log_file = str(out / "analyze.log")
+    warnings: list[str] = []
+    data, sr = read_audio(args.input)
+    duration = round(len(data) / sr, 2)
+    if duration < 10:
+        raise WorkerError("Файл слишком короткий — нужна песня хотя бы 10 секунд")
+
+    stage("separate", "Отделяем голос от музыки")
+    progress(0.02, "Отделяем голос от музыки")
+    vocals_tmp, inst_tmp = separate(args.input, work, args, log_file)
+    shutil.copyfile(vocals_tmp, out / "vocals.wav")
+    shutil.copyfile(inst_tmp, out / "instrumental.wav")
+    shutil.rmtree(work, ignore_errors=True)
+
+    stage("music", "Определяем темп и тональность")
+    progress(0.35, "Определяем темп и тональность")
+    inst, isr = read_audio(out / "instrumental.wav")
+    bpm = estimate_bpm(to_mono(inst), isr)
+    key = estimate_key(to_mono(inst), isr)
+    voc, vsr = read_audio(out / "vocals.wav")
+    vm = to_mono(voc)
+    f0 = estimate_f0(vm, vsr)
+    vocal_sec = sum(e - s for s, e in voiced_regions(vm, vsr)) / vsr
+    if vocal_sec < 8:
+        warnings.append("В песне почти не слышно голоса — текст может не распознаться")
+
+    stage("transcribe", "Распознаём слова")
+    progress(0.42, "Загружаем модель распознавания…")
+    words, lang, backend = transcribe(str(out / "vocals.wav"), args, duration)
+    if not words:
+        warnings.append("Слова не распознаны — впишите текст вручную")
+    (out / "words.json").write_text(json.dumps({"language": lang, "words": words}, ensure_ascii=False), encoding="utf-8")
+    progress(1.0, "Готово")
+    return {
+        "duration": duration, "bpm": bpm, "key": key, "f0Median": f0, "note": note_name(f0),
+        "language": lang, "words": words, "asr": backend,
+        "vocals": "vocals.wav", "instrumental": "instrumental.wav", "vocalSeconds": round(vocal_sec, 1), "warnings": warnings,
+    }
+
+
+# ───────────────────────── overlay (новый вокал на родной минус) ─────────────────────────
+
+def cmd_overlay(args) -> dict:
+    work = Path(args.work)
+    work.mkdir(parents=True, exist_ok=True)
+    log_file = str(work / "overlay.log")
+    stage("separate", "Выделяем новый вокал")
+    progress(0.03, "Выделяем новый вокал")
+    new_vocals, _ = separate(args.input, work, args, log_file)
+    semis = 0
+    voice = new_vocals
+    if args.reference:
+        if args.semitones == "auto":
+            v, vsr = read_audio(new_vocals)
+            semis = octave_shift(estimate_f0(to_mono(v)[: vsr * 90], vsr), float(args.target_f0) if args.target_f0 else None)
+        else:
+            semis = int(args.semitones)
+        stage("convert", "Перепеваем выбранным голосом")
+        progress(0.35, "Перепеваем выбранным голосом", semitones=semis)
+        voice = convert_vocals(new_vocals, args.reference, work / "converted", args, semis, log_file)
+    stage("mix", "Сводим новый вокал с исходной музыкой")
+    progress(0.9, "Сводим новый вокал с исходной музыкой")
+    result = mix(args.instrumental, args.orig_vocals, voice, args.out, args.format, float(args.vocal_gain))
+    if not args.keep_work:
+        shutil.rmtree(work, ignore_errors=True)
+    progress(1.0, "Готово")
+    return {"output": result, "semitones": semis}
+
+
 # ───────────────────────── export / import / check ─────────────────────────
 
 EXPORT_FILES = ["voice.json", "reference.wav", "model/ft_model.pth", "model/config.yml"]
@@ -639,7 +962,7 @@ def cmd_check(args) -> dict:
     except Exception:
         cuda = None
         problems.append("В окружении Seed-VC не установлен PyTorch")
-    return {"ok": not problems, "problems": problems, "cuda": cuda, "python": sys.version.split()[0]}
+    return {"ok": not problems, "problems": problems, "cuda": cuda, "python": sys.version.split()[0], "asr": asr_available()}
 
 
 # ───────────────────────── main ─────────────────────────
@@ -676,9 +999,24 @@ def main(argv=None) -> int:
     sp = sub.add_parser("import"); sp.add_argument("--file", required=True); sp.add_argument("--out-dir", required=True)
     sp = sub.add_parser("check"); common(sp)
 
+    sp = sub.add_parser("analyze"); common(sp)
+    sp.add_argument("--input", required=True); sp.add_argument("--out", required=True)
+    sp.add_argument("--language", default="auto"); sp.add_argument("--asr-backend", default="auto")
+    sp.add_argument("--asr-model", default="large-v3"); sp.add_argument("--asr-models", default="")
+    sp.add_argument("--asr-fake", default="")
+
+    sp = sub.add_parser("overlay"); common(sp)
+    sp.add_argument("--input", required=True); sp.add_argument("--instrumental", required=True)
+    sp.add_argument("--orig-vocals", required=True); sp.add_argument("--out", required=True); sp.add_argument("--work", required=True)
+    sp.add_argument("--reference", default=""); sp.add_argument("--checkpoint", default=""); sp.add_argument("--config", default="")
+    sp.add_argument("--steps", type=int, default=25); sp.add_argument("--semitones", default="auto")
+    sp.add_argument("--target-f0", default=""); sp.add_argument("--format", default="mp3")
+    sp.add_argument("--vocal-gain", default="0"); sp.add_argument("--keep-work", action="store_true")
+
     args = p.parse_args(argv)
     handlers = {"prepare": cmd_prepare, "train": cmd_train, "apply": cmd_apply,
-                "export": cmd_export, "import": cmd_import, "check": cmd_check}
+                "export": cmd_export, "import": cmd_import, "check": cmd_check,
+                "analyze": cmd_analyze, "overlay": cmd_overlay}
     try:
         result = handlers[args.cmd](args)
         emit("done", result=result)

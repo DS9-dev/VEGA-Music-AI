@@ -9,3 +9,5 @@ build/root.json
 Voices/
 __pycache__/
 *.pyc
+Songs/
+Models/
