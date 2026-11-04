@@ -1,7 +1,7 @@
 {
   "name": "vega-music-ai",
   "productName": "VEGA-Music-AI",
-  "version": "3.0.4",
+  "version": "3.0.5",
   "description": "VEGA-Music-AI — генератор песен на локальных моделях: текст (LM Studio), музыка (ACE-Step 1.5) и свои голоса (Seed-VC)",
   "private": true,
   "main": "dist/main.cjs",

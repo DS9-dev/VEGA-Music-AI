@@ -602,6 +602,7 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     'KEEP THE MUSICAL SKELETON — this matters more than anything else:',
     '- The same sections in the same order, with exactly the section headers given below.',
     '- In every section write EXACTLY the given number of lines, one new line per original phrase, and give each line its syllable count (±1). Count the syllables (vowels) of every line before you write it. Short simple words help to stay within the count.',
+    '- Every line is a complete sung phrase. NEVER put one or two words on a separate line and never split a phrase just to reach the line count.',
     ...(translated ? [`- The original is in ${langDef(song.language).en}, but the NEW lyrics must be written in ${lang.en}. Count syllables of the ${lang.en} words.`] : []),
     '- A section that is sung several times (the chorus) is written ONCE; it will be repeated automatically.',
     '',
@@ -694,6 +695,43 @@ export function parseRewrite(raw: string, parts: UniquePart[]): ParsedRewrite {
     if (cur) cur.push(line);
   }
   return { title, parts: out };
+}
+
+/** Строка из одного слова — «огрызок», который модель отрывает ради числа строк: приклеиваем к следующей. */
+export function mergeStubLines(lines: string[]): string[] {
+  const out: string[] = [];
+  let carry = '';
+  for (const l of lines) {
+    const words = l.trim().split(/\s+/).filter(Boolean);
+    if (words.length === 1 && countSyllables(l) <= 3) { carry = carry ? `${carry} ${l.trim()}` : l.trim(); continue; }
+    if (carry) {
+      const next = /^I\b/.test(l) ? l : l[0].toLocaleLowerCase() + l.slice(1);
+      out.push(`${carry.replace(/[.,;:!?…—-]+$/, '')} ${next}`);
+      carry = '';
+    } else out.push(l);
+  }
+  if (carry) {
+    if (out.length) out[out.length - 1] = `${out[out.length - 1]} ${carry[0].toLocaleLowerCase()}${carry.slice(1)}`;
+    else out.push(carry);
+  }
+  return out;
+}
+
+/**
+ * Насколько секция не попадает в такт (0 — идеально): промах по сумме слогов
+ * плюс средний промах по строкам и штраф за другое число строк.
+ */
+export function fitScore(lines: string[] | undefined, part: Pick<UniquePart, 'target' | 'lineTargets'>): number {
+  if (!lines?.length) return 9;
+  const counts = lines.map((l) => countSyllables(l));
+  const total = counts.reduce((a, b) => a + b, 0);
+  const totalMiss = Math.abs(total - part.target) / Math.max(1, part.target);
+  const n = Math.min(counts.length, part.lineTargets.length);
+  let lineMiss = 0;
+  for (let i = 0; i < n; i++) lineMiss += Math.abs(counts[i] - part.lineTargets[i]) / Math.max(3, part.lineTargets[i]);
+  lineMiss = n ? lineMiss / n : 1;
+  const countMiss = Math.abs(counts.length - part.lineTargets.length) / Math.max(1, part.lineTargets.length);
+  return totalMiss + 0.35 * lineMiss + 0.2 * countMiss;
 }
 
 export interface RewriteCheck { part: UniquePart; actual: number; level: 'ok' | 'warn' | 'bad' }

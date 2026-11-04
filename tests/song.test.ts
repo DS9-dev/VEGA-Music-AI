@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import {
   applyCleanup, applyRestructure, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
-  guessGender, lineTargets, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
+  fitScore, guessGender, lineTargets, mergeStubLines, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
 } from '../src/shared/song';
 import type { Song, SongWord } from '../src/shared/types';
 
@@ -264,4 +264,15 @@ test('бюджет по строкам: слоги строк оригинала
   assert.match(msg[1].content, /\[Verse 1\] — 4 lines, syllables per line: 1\) \d+, 2\) \d+, 3\) \d+, 4\) \d+/);
   assert.match(msg[0].content, /The singer is a WOMAN.*я вернулась/);
   assert.match(msg[0].content, /AABB or ABAB/);
+});
+
+test('строки-огрызки из одного слова приклеиваются к следующей; оценка учитывает строки', () => {
+  const lines = ['Я', 'Выхожу из корабля, но пыль не тает', 'Он', 'Сжимается в кулак', 'Вернусь'];
+  assert.deepEqual(mergeStubLines(lines), ['Я выхожу из корабля, но пыль не тает', 'Он сжимается в кулак вернусь']);
+  assert.deepEqual(mergeStubLines(['Я здесь', 'Снова здесь', 'Пусть мир не ждёт']), ['Я здесь', 'Снова здесь', 'Пусть мир не ждёт']);
+  const part = { target: 28, lineTargets: [7, 7, 7, 7] };
+  const even = ['Я выхожу из корабля', 'Пыль кружит у самых ног', 'Ветер бьёт в лицо опять', 'Здесь не ждут меня давно'];
+  const stubs = ['Я', 'Выхожу из корабля, но пыль не тает', 'Он', 'Сжимается в кулак — как будто злится'];
+  assert.ok(fitScore(even, part) < 0.16, `even=${fitScore(even, part)}`);
+  assert.ok(fitScore(stubs, part) > fitScore(even, part) + 0.15);
 });
