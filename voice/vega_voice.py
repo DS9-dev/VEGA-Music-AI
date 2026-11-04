@@ -262,42 +262,48 @@ def split_long(s: int, e: int, sr: int, max_len: float = 14.0, target: float = 9
     return [(s + i * step, s + (i + 1) * step if i < parts - 1 else e) for i in range(parts)]
 
 
-def estimate_f0(x: np.ndarray, sr: int, fmin: float = 65.0, fmax: float = 1000.0) -> float | None:
-    """Медианная высота тона (Гц) по автокорреляции на звонких кадрах. Достаточно для выбора октавы."""
+def estimate_f0(x: np.ndarray, sr: int, fmin: float = 60.0, fmax: float = 800.0, threshold: float = 0.2) -> float | None:
+    """Медианная высота тона (Гц) алгоритмом YIN: устойчив к октавным ошибкам на хриплом и искажённом вокале."""
     if len(x) < sr // 4:
         return None
-    y = resample(x, sr, 16000)
+    y = resample(x, sr, 16000).astype(np.float64)
     sr = 16000
-    frame, hop = 1024, 256
-    n = 1 + (len(y) - frame) // hop
+    w = 1024
+    tau_max = min(w - 1, int(sr / fmin))
+    tau_min = max(2, int(sr / fmax))
+    hop = 256
+    n = 1 + (len(y) - (w + tau_max)) // hop
     if n <= 0:
         return None
     step = max(1, n // 1500)
-    lag_min, lag_max = int(sr / fmax), min(frame - 1, int(sr / fmin))
-    win = np.hanning(frame)
-    energy_thr = 10 ** ((float(np.max(frame_db(y, frame, hop))) - 30) / 20)
+    db = frame_db(y.astype(np.float32), w, hop)
+    thr = float(np.max(db)) - 30
     vals = []
+    nfft = 1 << int(np.ceil(np.log2(2 * (w + tau_max))))
     for i in range(0, n, step):
-        f = y[i * hop: i * hop + frame] * win
-        if np.sqrt(np.mean(f ** 2)) < energy_thr:
+        if i < len(db) and db[i] < thr:
             continue
-        spec = np.fft.rfft(f, 2 * frame)
-        ac = np.fft.irfft(np.abs(spec) ** 2)[:frame]
-        if ac[0] <= 0:
+        seg = y[i * hop: i * hop + w + tau_max]
+        a = seg[:w]
+        # d(tau) = sum (a_j - seg_{j+tau})^2 = E_a + E_tau - 2 r(tau)
+        r = np.fft.irfft(np.fft.rfft(seg, nfft) * np.conj(np.fft.rfft(a, nfft)), nfft)[: tau_max + 1]
+        sq = np.concatenate([[0.0], np.cumsum(seg ** 2)])
+        e_tau = sq[np.arange(tau_max + 1) + w] - sq[np.arange(tau_max + 1)]
+        d = np.maximum(0.0, sq[w] + e_tau - 2 * r)
+        cm = np.ones_like(d)
+        cs = np.cumsum(d[1:])
+        cm[1:] = d[1:] * np.arange(1, tau_max + 1) / np.maximum(cs, 1e-12)
+        below = np.where(cm[tau_min:tau_max] < threshold)[0]
+        if len(below) == 0:
             continue
-        ac = ac / ac[0]
-        seg = ac[lag_min:lag_max]
-        if len(seg) == 0:
-            continue
-        lag = int(np.argmax(seg)) + lag_min
-        if ac[lag] < 0.45:
-            continue
-        # уточнение параболой
-        if 0 < lag < len(ac) - 1:
-            a, b, c = ac[lag - 1], ac[lag], ac[lag + 1]
-            d = (a - c) / (2 * (a - 2 * b + c)) if (a - 2 * b + c) != 0 else 0
-            lag = lag + d
-        vals.append(sr / lag)
+        t = below[0] + tau_min
+        while t + 1 < tau_max and cm[t + 1] < cm[t]:
+            t += 1
+        if 0 < t < tau_max:  # уточнение параболой
+            p, q, s_ = cm[t - 1], cm[t], cm[t + 1]
+            den = p - 2 * q + s_
+            t = t + ((p - s_) / (2 * den) if den else 0)
+        vals.append(sr / t)
     if len(vals) < 5:
         return None
     return float(np.median(vals))
@@ -502,8 +508,8 @@ def cmd_prepare(args) -> dict:
     reference = np.concatenate(ref_parts) if ref_parts else candidates[0][1]
     ref_path = write_audio(out / "reference.wav", reference, SR)
 
-    sample = np.concatenate(all_voiced)[: SR * 120]
-    f0 = estimate_f0(sample, SR)
+    # высота голоса — по всем фразам всех песен (оценщик сам прореживает кадры), а не по первым минутам первой песни
+    f0 = estimate_f0(np.concatenate(all_voiced), SR)
     warnings = []
     if seg_seconds < 30:
         warnings.append("Очень мало чистого вокала (меньше 30 с). Голос будет похож лишь отдалённо — добавьте ещё песен.")

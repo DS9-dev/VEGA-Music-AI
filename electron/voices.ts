@@ -3,6 +3,25 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync
 import { join } from 'node:path';
 import type { VoiceModel } from '../src/shared/types';
 
+const NOTES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+export function noteName(hz: number): string {
+  const midi = Math.round(69 + 12 * Math.log2(hz / 440));
+  return `${NOTES[((midi % 12) + 12) % 12]}${Math.floor(midi / 12) - 1}`;
+}
+
+/**
+ * Средняя высота голоса с поправкой на пол: прежний оценщик на хриплом вокале ошибался на октаву вверх
+ * (мужской голос «G4»). В пении мужской голос в среднем ниже ~260 Гц, женский — выше ~160 Гц.
+ */
+export function normalizeVoicePitch<T extends Pick<VoiceModel, 'gender' | 'f0Median' | 'note'>>(v: T): T {
+  let f = v.f0Median;
+  if (!f || !Number.isFinite(f)) return v;
+  if (v.gender === 'male') while (f > 260) f /= 2;
+  else while (f < 160) f *= 2;
+  if (f === v.f0Median) return v;
+  return { ...v, f0Median: Math.round(f * 10) / 10, note: noteName(f) };
+}
+
 export class VoiceStore {
   constructor(private root: () => string) {}
 
@@ -19,13 +38,13 @@ export class VoiceStore {
       if (!d.isDirectory()) continue;
       const f = join(root, d.name, 'voice.json');
       if (!existsSync(f)) continue;
-      try { out.push({ ...JSON.parse(readFileSync(f, 'utf8')), id: d.name }); } catch { /* битый файл */ }
+      try { out.push(normalizeVoicePitch({ ...JSON.parse(readFileSync(f, 'utf8')), id: d.name })); } catch { /* битый файл */ }
     }
     return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   }
 
   get(id: string): VoiceModel {
-    return { ...JSON.parse(readFileSync(join(this.dir(id), 'voice.json'), 'utf8')), id };
+    return normalizeVoicePitch({ ...JSON.parse(readFileSync(join(this.dir(id), 'voice.json'), 'utf8')), id });
   }
 
   allocate(name: string): string {

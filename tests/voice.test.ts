@@ -221,7 +221,7 @@ test('создание трека с голосом: ACE → перепевка 
   assert.ok(steps.includes(3) && steps.includes(4));
   const t = library.read(fin.trackId!);
   assert.equal(t.voiceName, 'Солист');
-  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1', 'Вариант 2', 'Вариант 1 · ACE', 'Вариант 2 · ACE']);
+  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1 · Солист', 'Вариант 2 · Солист', 'Вариант 1 · голос ACE-Step', 'Вариант 2 · голос ACE-Step']);
   for (const v of t.variants) assert.ok(existsSync(library.filePath(t.id, v.file)), v.file);
   // выбранный, но не готовый голос — понятная ошибка до запуска
   assert.throws(() => gen.start({ ...DEFAULT_PARAMS, voiceId: 'нет-такого' }, 'x', 'y'), /не готов/);
@@ -422,7 +422,7 @@ test('новые слова на эту музыку: ремейк (cover) и le
   assert.equal(lg.model, s.aceBaseModel);
   t = library.read(fin.trackId!);
   assert.equal(t.voiceName, 'Солист');
-  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1']);
+  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1 · Солист']);
   assert.ok(!existsSync(library.filePath(t.id, 'variant-1-ace.wav')), 'исходник ACE удалён, когда не нужен');
   void root;
 });

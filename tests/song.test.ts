@@ -284,3 +284,11 @@ test('язык пения определяется по тексту', () => {
   assert.equal(detectLanguage('[Chorus]\nNoche de luna', 'es'), 'es');
   assert.equal(detectLanguage('[Intro]', 'en'), 'en');
 });
+
+test('высота голоса: ошибка на октаву у мужского голоса исправляется по полу', async () => {
+  const { normalizeVoicePitch } = await import('../electron/voices');
+  assert.deepEqual(normalizeVoicePitch({ gender: 'male', f0Median: 395.8, note: 'G4' }), { gender: 'male', f0Median: 197.9, note: 'G3' });
+  assert.deepEqual(normalizeVoicePitch({ gender: 'female', f0Median: 131, note: 'C3' }), { gender: 'female', f0Median: 262, note: 'C4' });
+  const ok = { gender: 'male' as const, f0Median: 150, note: 'D3' };
+  assert.equal(normalizeVoicePitch(ok), ok);
+});

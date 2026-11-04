@@ -188,7 +188,7 @@ export class Generator {
       const ext = (files[i].file.match(/\.(mp3|wav|flac|ogg)(?:$|[?&])/i)?.[1] ?? s.audioFormat).toLowerCase();
       const name = withVoice ? `variant-${i + 1}-ace.${ext}` : `variant-${i + 1}.${ext}`;
       await this.d.ace.download(files[i].file, this.d.library.filePath(id, name));
-      originals.push({ file: name, seed: files[i].seed, ...(withVoice ? { label: `Вариант ${i + 1} · ACE`, original: true } : {}) });
+      originals.push({ file: name, seed: files[i].seed, ...(withVoice ? { label: `Вариант ${i + 1} · голос ACE-Step`, original: true } : {}) });
     }
     const track: Track = {
       id,
@@ -216,7 +216,7 @@ export class Generator {
             const n = originals.length;
             this.set({ progress: 0.66 + 0.3 * ((i + f) / n), detail: `${text}${n > 1 ? ` · вариант ${i + 1} из ${n}` : ''}`, elapsedSec: seconds() });
           }, signal);
-          converted.push({ file: basename(file), seed: originals[i].seed, label: `Вариант ${i + 1}` });
+          converted.push({ file: basename(file), seed: originals[i].seed, label: `Вариант ${i + 1} · ${voiceName}` });
         }
       } catch (e: any) {
         if (e?.name === 'AbortError') throw e;

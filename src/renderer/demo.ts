@@ -125,7 +125,7 @@ export function installDemoApi() {
   ];
   tracks.splice(1, 0, { id: 'demoV', title: 'Огни после полуночи · Мой голос', createdAt: new Date(Date.now() - 1.5 * H).toISOString(),
     params: { ...base, voiceId: 'my' }, lyrics: demoText(base).full, caption: buildCaption(base), bpm: 105, voiceName: 'Мой голос',
-    variants: [{ file: 'variant-1.mp3', label: 'Вариант 1', favorite: true }, { file: 'variant-2.mp3', label: 'Вариант 2' }, { file: 'variant-1-ace.mp3', label: 'Вариант 1 · ACE', original: true }, { file: 'variant-2-ace.mp3', label: 'Вариант 2 · ACE', original: true }],
+    variants: [{ file: 'variant-1.mp3', label: 'Вариант 1 · Мой голос', favorite: true }, { file: 'variant-2.mp3', label: 'Вариант 2 · Мой голос' }, { file: 'variant-1-ace.mp3', label: 'Вариант 1 · голос ACE-Step', original: true }, { file: 'variant-2-ace.mp3', label: 'Вариант 2 · голос ACE-Step', original: true }],
     generationSeconds: 236 });
 
   const emit = (s: Partial<JobState>) => { job = { ...job, ...s }; jobSubs.forEach((f) => f(job)); };
@@ -181,7 +181,7 @@ export function installDemoApi() {
           emit({ phase: 'saving', step: withVoice ? 4 : 3, stageLabel: 'Сохранение', detail: 'Сохраняем трек…', progress: 0.98 });
           await sleep(800);
           const t: Track = { id: 'demo' + Date.now(), title, createdAt: new Date().toISOString(), params: p, lyrics: p.instrumental ? '[Instrumental]' : demoText(p).full, caption: buildCaption(p), bpm: 120, variants: Array.from({ length: p.variants }, (_, i) => ({ file: `variant-${i + 1}.wav`, label: `Вариант ${i + 1}` })), generationSeconds: 32, voiceName: withVoice ? vname : undefined };
-          if (withVoice) t.variants.push(...t.variants.map((v, i) => ({ file: `variant-${i + 1}-ace.wav`, label: `Вариант ${i + 1} · ACE`, original: true })));
+          if (withVoice) t.variants.push(...t.variants.map((v, i) => ({ file: `variant-${i + 1}-ace.wav`, label: `Вариант ${i + 1} · голос ACE-Step`, original: true })));
           tracks.unshift(t);
           emit({ phase: 'done', step: withVoice ? 4 : 3, stageLabel: 'Готово', progress: 1, trackId: t.id, etaSec: null, elapsedSec: 32 });
         })();
@@ -287,7 +287,7 @@ export function installDemoApi() {
           [2, 'Вокал', 'Выделяем новый вокал'], [3, 'Сведение', 'Сводим новый вокал с исходной музыкой']], 22, () => {
           const t: Track = { id: 'rm' + Date.now(), title: spec.title, createdAt: new Date().toISOString(), params: { ...songTrackParams(x, DEFAULT_PARAMS), genres: ['Синтвейв', 'Рок'] },
             lyrics: spec.text, caption: x.caption ?? '', bpm: x.bpm ?? 0, generationSeconds: 96, voiceName: spec.voiceId ? voices.find((v) => v.id === spec.voiceId)?.name : undefined,
-            variants: [{ file: 'variant-1.mp3', label: 'Вариант 1' }, ...(spec.keepAce ? [{ file: 'variant-1-ace.mp3', label: 'Вариант 1 · ACE', original: true }] : [])] };
+            variants: [{ file: 'variant-1.mp3', label: 'Вариант 1' }, ...(spec.keepAce ? [{ file: 'variant-1-ace.mp3', label: 'Вариант 1 · голос ACE-Step', original: true }] : [])] };
           tracks.unshift(t);
           return { trackId: t.id, detail: 'Новый вокал сведён с исходной музыкой' };
         }, spec.songId);

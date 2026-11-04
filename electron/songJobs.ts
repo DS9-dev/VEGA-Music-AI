@@ -372,7 +372,7 @@ export class SongJobs {
       const ext = (files[i].file.match(/\.(mp3|wav|flac|ogg)(?:$|[?&])/i)?.[1] ?? s.audioFormat).toLowerCase();
       const name = `variant-${i + 1}-ace.${ext}`;
       await this.d.ace.download(files[i].file, this.d.library.filePath(trackId, name));
-      ace.push({ file: name, seed: files[i].seed, label: `Вариант ${i + 1} · ACE`, original: true });
+      ace.push({ file: name, seed: files[i].seed, label: `Вариант ${i + 1} · голос ACE-Step`, original: true });
     }
 
     const params = {
@@ -443,14 +443,14 @@ export class SongJobs {
       for (let i = 0; i < ace.length; i++) {
         const n = ace.length > 1 ? ` · вариант ${i + 1} из ${ace.length}` : '';
         if (lego) {
-          main.push({ file: await overlay(i, `variant-${i + 1}.${s.audioFormat}`, n), seed: ace[i].seed, label: `Вариант ${i + 1}` });
+          main.push({ file: await overlay(i, `variant-${i + 1}.${s.audioFormat}`, n), seed: ace[i].seed, label: voice ? `Вариант ${i + 1} · ${voice.name}` : `Вариант ${i + 1}` });
           done++;
           continue;
         }
         if (voice) {
           const r = await applyVoice(cfg, s, this.d.voices, voice.id, this.d.library.filePath(trackId, ace[i].file),
             this.d.library.filePath(trackId, `variant-${i + 1}.${s.audioFormat}`), spec.voiceShift, onWorker(n), signal);
-          main.push({ file: basename(r.output), seed: ace[i].seed, label: `Вариант ${i + 1}` });
+          main.push({ file: basename(r.output), seed: ace[i].seed, label: `Вариант ${i + 1} · ${voice.name}` });
           done++;
         } else main.push({ ...ace[i], label: `Вариант ${i + 1}`, original: undefined });
         if (spec.overlay) {
