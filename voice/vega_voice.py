@@ -66,15 +66,13 @@ def progress(value: float, text: str = "", **kw) -> None:
 
 # ───────────────────────── аудио ─────────────────────────
 
-def read_audio(path: str | Path) -> tuple[np.ndarray, int]:
-    """Возвращает (samples × channels float32, sample_rate)."""
-    path = str(path)
-    try:
-        import soundfile as sf  # type: ignore
-        data, sr = sf.read(path, always_2d=True, dtype="float32")
-        return data, int(sr)
-    except ImportError:
-        pass
+def _read_soundfile(path: str) -> tuple[np.ndarray, int]:
+    import soundfile as sf  # type: ignore
+    data, sr = sf.read(path, always_2d=True, dtype="float32")
+    return data, int(sr)
+
+
+def _read_wav_scipy(path: str) -> tuple[np.ndarray, int]:
     from scipy.io import wavfile
     sr, data = wavfile.read(path)
     if data.dtype == np.int16:
@@ -87,6 +85,91 @@ def read_audio(path: str | Path) -> tuple[np.ndarray, int]:
     if data.ndim == 1:
         data = data[:, None]
     return data, int(sr)
+
+
+def _read_pyav(path: str) -> tuple[np.ndarray, int]:
+    """AAC, M4A, OPUS, MP3… через PyAV (ставится вместе с faster-whisper, внутри — ffmpeg)."""
+    import av  # type: ignore
+    with av.open(path) as box:
+        stream = next(st for st in box.streams if st.type == "audio")
+        sr = int(stream.rate or stream.codec_context.sample_rate or SR)
+        channels = min(2, max(1, int(stream.codec_context.channels or 2)))
+        resampler = av.AudioResampler(format="fltp", layout="stereo" if channels == 2 else "mono", rate=sr)
+        chunks = []
+        for frame in box.decode(stream):
+            for f in resampler.resample(frame) or []:
+                chunks.append(f.to_ndarray())
+        try:
+            for f in resampler.resample(None) or []:  # остаток буфера (PyAV 9+)
+                chunks.append(f.to_ndarray())
+        except Exception:
+            pass
+    if not chunks:
+        raise WorkerError("в файле нет аудио")
+    data = np.concatenate(chunks, axis=1).T.astype(np.float32)
+    return data, sr
+
+
+def _read_torchaudio(path: str) -> tuple[np.ndarray, int]:
+    import torchaudio  # type: ignore
+    wav, sr = torchaudio.load(path)
+    return wav.numpy().T.astype(np.float32), int(sr)
+
+
+def _ffmpeg_exe() -> str | None:
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg  # type: ignore
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return None
+
+
+def _read_ffmpeg(path: str) -> tuple[np.ndarray, int]:
+    exe = _ffmpeg_exe()
+    if not exe:
+        raise WorkerError("ffmpeg не найден")
+    kw = {"creationflags": 0x08000000} if os.name == "nt" else {}
+    proc = subprocess.run([exe, "-v", "error", "-i", path, "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "2", "-ar", str(SR), "-"],
+                          capture_output=True, **kw)
+    if proc.returncode != 0 or not proc.stdout:
+        raise WorkerError(proc.stderr.decode("utf-8", "replace")[-300:] or "ffmpeg не смог прочитать файл")
+    return np.frombuffer(proc.stdout, dtype=np.float32).reshape(-1, 2).copy(), SR
+
+
+AUDIO_READERS = [_read_soundfile, _read_pyav, _read_torchaudio, _read_ffmpeg]
+
+
+def read_audio(path: str | Path) -> tuple[np.ndarray, int]:
+    """Возвращает (samples × channels float32, sample_rate). Пробует несколько декодеров по очереди."""
+    path = str(path)
+    if path.lower().endswith(".wav"):
+        try:
+            return _read_soundfile(path)
+        except ImportError:
+            return _read_wav_scipy(path)
+        except Exception:
+            pass
+    errors = []
+    for reader in AUDIO_READERS:
+        try:
+            data, sr = reader(path)
+            if data.ndim == 1:
+                data = data[:, None]
+            if data.size:
+                return data, sr
+        except ImportError:
+            continue
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{reader.__name__.replace('_read_', '')}: {str(e).splitlines()[0][:120] if str(e) else type(e).__name__}")
+    ext = Path(path).suffix.lower() or "без расширения"
+    raise WorkerError(
+        f"Не удалось прочитать аудио {Path(path).name} ({ext}). Сконвертируйте файл в MP3, WAV или FLAC "
+        f"или установите в окружение Seed-VC модуль PyAV: .venv\\Scripts\\pip install av"
+        + (f"\nПодробности: {'; '.join(errors)}" if errors else "")
+    )
 
 
 def write_audio(path: str | Path, data: np.ndarray, sr: int, fmt: str = "wav") -> str:

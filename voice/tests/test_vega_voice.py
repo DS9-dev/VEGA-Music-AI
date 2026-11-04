@@ -166,6 +166,38 @@ class MusicAnalysisTests(unittest.TestCase):
         self.assertEqual([w["w"] for w in out], ["раз", "два", "три"], "галлюцинация «спасибо» отброшена")
         self.assertTrue(4.5 < out[1]["s"] < 5.6)
 
+    def test_read_audio_falls_back_to_other_decoders(self):
+        tmp = Path(tempfile.mkdtemp(prefix="vv-read-"))
+        f = tmp / "song.aac"
+        f.write_bytes(b"not really aac")
+        calls = []
+
+        def broken(path):
+            calls.append("soundfile")
+            raise RuntimeError("Format not recognised.")
+
+        def missing(path):
+            calls.append("pyav")
+            raise ImportError("no av")
+
+        def works(path):
+            calls.append("ffmpeg")
+            return np.zeros((SR, 2), np.float32), SR
+
+        saved = vv.AUDIO_READERS
+        try:
+            vv.AUDIO_READERS = [broken, missing, works]
+            data, sr = vv.read_audio(f)
+            self.assertEqual(calls, ["soundfile", "pyav", "ffmpeg"])
+            self.assertEqual((data.shape, sr), ((SR, 2), SR))
+            vv.AUDIO_READERS = [broken, missing]
+            with self.assertRaises(vv.WorkerError) as cm:
+                vv.read_audio(f)
+            self.assertIn("pip install av", str(cm.exception))
+            self.assertIn("Format not recognised", str(cm.exception))
+        finally:
+            vv.AUDIO_READERS = saved
+
     def test_language_guess(self):
         self.assertEqual(vv.guess_language("Ночь моя неоновая"), "ru")
         self.assertEqual(vv.guess_language("Їжак і ґанок"), "uk")
