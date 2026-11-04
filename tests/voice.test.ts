@@ -254,6 +254,24 @@ function songWords() {
   ];
 }
 
+/** Разбор multipart/form-data имитацией ACE-Step: поля + имя и размер загруженного файла. */
+function parseMultipart(body: string, type: string): Record<string, any> {
+  const m = type.match(/boundary=(.+)$/);
+  if (!m) return JSON.parse(Buffer.from(body, 'latin1').toString('utf8'));
+  const out: Record<string, any> = {};
+  for (const part of body.split(`--${m[1]}`)) {
+    const head = part.indexOf('\r\n\r\n');
+    if (head < 0) continue;
+    const headers = part.slice(0, head);
+    const value = part.slice(head + 4).replace(/\r\n$/, '');
+    const name = headers.match(/name="([^"]+)"/)?.[1];
+    const filename = headers.match(/filename="([^"]+)"/)?.[1];
+    if (!name) continue;
+    if (filename) { out.__file = filename; out.__fileBytes = value.length; out.__field = name; } else out[name] = Buffer.from(value, 'latin1').toString('utf8');
+  }
+  return out;
+}
+
 function songSetup() {
   const base = setup();
   const fake = join(base.root, 'words.json');
@@ -343,11 +361,12 @@ test('новые слова на эту музыку: repaint и lego → нов
   let polls = 0;
   const server = createServer((req, res) => {
     const send = (data: any, code = 200) => { res.statusCode = code; res.end(JSON.stringify(code === 200 ? { data, code: 200 } : { detail: data })); };
-    let body = '';
-    req.on('data', (c) => { body += c; });
+    const chunks: Buffer[] = [];
+    req.on('data', (c) => { chunks.push(c); });
     req.on('end', () => {
+      const body = Buffer.concat(chunks).toString('latin1');
       if (req.url === '/release_task') {
-        const b = JSON.parse(body);
+        const b = parseMultipart(body, String(req.headers['content-type'] ?? ''));
         bodies.push(b);
         if (b.task_type === 'lego' && inits === 0) { send('Model acestep-v15-base not loaded', 400); return; }
         send({ task_id: `t${bodies.length}` });
@@ -378,8 +397,11 @@ test('новые слова на эту музыку: repaint и lego → нов
   assert.equal(fin.phase, 'done', fin.error ?? '');
   const rp = bodies.at(-1);
   assert.equal(rp.task_type, 'repaint');
-  assert.equal(rp.src_audio_path, join(songs.dir(id), 'source.wav'));
-  assert.ok(rp.repainting_start > 0 && rp.repainting_start < 1 && rp.repainting_end > 26 && rp.repainting_end <= 30.1, `${rp.repainting_start}–${rp.repainting_end}`);
+  assert.equal(rp.src_audio_path, undefined, 'абсолютный путь не отправляется — ACE-Step его запрещает');
+  assert.equal(rp.__file, 'source.wav');
+  assert.ok(rp.__fileBytes > 1_000_000, 'аудио загружено в запросе');
+  const rs = Number(rp.repainting_start), re = Number(rp.repainting_end);
+  assert.ok(rs > 0 && rs < 1 && re > 26 && re <= 30.1, `${rs}–${re}`);
   assert.match(rp.prompt, /male vocal/);
   assert.match(rp.lyrics, /Снег идёт/);
   let t = library.read(fin.trackId!);
@@ -394,7 +416,7 @@ test('новые слова на эту музыку: repaint и lego → нов
   const lg = bodies.at(-1);
   assert.equal(lg.task_type, 'lego');
   assert.equal(lg.track_name, 'vocals');
-  assert.equal(lg.src_audio_path, join(songs.dir(id), 'instrumental.wav'));
+  assert.equal(lg.__file, 'instrumental.wav');
   assert.equal(lg.model, s.aceBaseModel);
   t = library.read(fin.trackId!);
   assert.equal(t.voiceName, 'Солист');

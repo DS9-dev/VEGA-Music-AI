@@ -1,7 +1,7 @@
 /** Клиент REST API ACE-Step 1.5 и управление его процессом. */
 import { spawn, execFile, type ChildProcess } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 
 export class AceError extends Error {}
 
@@ -39,6 +39,28 @@ export class AceClient {
     return json && typeof json === 'object' && 'data' in json ? json.data : json;
   }
 
+  /** multipart/form-data: поля запроса строками + аудио в поле src_audio. */
+  async upload(path: string, req: Record<string, unknown>, file: string, timeoutMs = 300_000): Promise<any> {
+    const form = new FormData();
+    for (const [k, v] of Object.entries(req)) {
+      if (k === 'src_audio_path' || v === undefined || v === null) continue;
+      form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    }
+    form.append('src_audio', new Blob([readFileSync(file)]), basename(file));
+    let res: Response;
+    try {
+      res = await fetch(this.base() + path, { method: 'POST', body: form, signal: AbortSignal.timeout(timeoutMs) });
+    } catch (e) {
+      throw new AceError(`ACE-Step недоступен (${this.base()}): ${(e as Error).message}`);
+    }
+    const text = await res.text();
+    let json: any = {};
+    try { json = text ? JSON.parse(text) : {}; } catch { /* не JSON */ }
+    if (!res.ok) throw new AceError(`ACE-Step ${path}: HTTP ${res.status} ${json?.error ?? json?.detail ?? text.slice(0, 300)}`);
+    if (json && typeof json === 'object' && 'code' in json && json.code !== 200 && json.error) throw new AceError(`ACE-Step ${path}: ${json.error}`);
+    return json && typeof json === 'object' && 'data' in json ? json.data : json;
+  }
+
   async health(): Promise<any> { return this.call('GET', '/health', undefined, 4000); }
 
   async isOnline(): Promise<boolean> {
@@ -50,7 +72,11 @@ export class AceClient {
   }
 
   async submit(req: Record<string, unknown>): Promise<string> {
-    const data = await this.call('POST', '/release_task', req, 60_000);
+    const src = typeof req.src_audio_path === 'string' ? req.src_audio_path : '';
+    // ACE-Step не принимает абсолютные пути (кроме временной папки) — локальный файл отправляем загрузкой
+    const data = src && isAbsolute(src) && existsSync(src)
+      ? await this.upload('/release_task', req, src)
+      : await this.call('POST', '/release_task', req, 60_000);
     const id = data?.task_id ?? data?.job_id ?? data?.id;
     if (!id) throw new AceError(`ACE-Step не вернул task_id: ${JSON.stringify(data).slice(0, 300)}`);
     return String(id);
