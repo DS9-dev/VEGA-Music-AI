@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import {
   applyCleanup, applyRestructure, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
-  fitScore, guessGender, lineTargets, mergeStubLines, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
+  detectLanguage, fitScore, guessGender, lineTargets, mergeStubLines, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
 } from '../src/shared/song';
 import type { Song, SongWord } from '../src/shared/types';
 
@@ -275,4 +275,12 @@ test('строки-огрызки из одного слова приклеив�
   const stubs = ['Я', 'Выхожу из корабля, но пыль не тает', 'Он', 'Сжимается в кулак — как будто злится'];
   assert.ok(fitScore(even, part) < 0.16, `even=${fitScore(even, part)}`);
   assert.ok(fitScore(stubs, part) > fitScore(even, part) + 0.15);
+});
+
+test('язык пения определяется по тексту', () => {
+  assert.equal(detectLanguage('[Verse 1]\nЯ пытался вернуться домой', 'en'), 'ru');
+  assert.equal(detectLanguage('[Verse 1]\nЇжак і ґанок', 'ru'), 'uk');
+  assert.equal(detectLanguage('[Chorus]\nWe ride tonight', 'ru'), 'en');
+  assert.equal(detectLanguage('[Chorus]\nNoche de luna', 'es'), 'es');
+  assert.equal(detectLanguage('[Intro]', 'en'), 'en');
 });

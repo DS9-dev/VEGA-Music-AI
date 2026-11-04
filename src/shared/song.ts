@@ -793,6 +793,23 @@ export function vocalSpan(song: Pick<Song, 'sections' | 'duration'>): { start: n
  * Пол по средней высоте голоса. В пении мужские голоса высоко: рок-тенор держится около C4–D4 (260–300 Гц),
  * поэтому порог выше, чем для речи; ошибку можно поправить в карточке песни.
  */
+/**
+ * Язык пения по самому тексту: кириллица → ru/uk, японская/корейская/китайская письменность — свой язык,
+ * латиница — язык по умолчанию, если он латинский, иначе английский.
+ */
+export function detectLanguage(text: string, fallback: string): string {
+  const body = text.replace(/\[[^\]]*\]/g, '');
+  const letters = body.match(/\p{L}/gu)?.length ?? 0;
+  if (!letters) return fallback;
+  const count = (re: RegExp) => body.match(re)?.length ?? 0;
+  const cyr = count(/[\u0400-\u04FF]/g);
+  if (cyr / letters > 0.5) return /[іїєґІЇЄҐ]/.test(body) ? 'uk' : fallback === 'uk' ? 'uk' : 'ru';
+  if (count(/[\u3040-\u30ff]/g) / letters > 0.2) return 'ja';
+  if (count(/[\uac00-\ud7af]/g) / letters > 0.3) return 'ko';
+  if (count(/[\u4e00-\u9fff]/g) / letters > 0.3) return 'zh';
+  return ['en', 'de', 'es', 'fr', 'it', 'pt'].includes(fallback) ? fallback : 'en';
+}
+
 export function guessGender(f0: number | null | undefined): 'male' | 'female' | null {
   if (!f0) return null;
   return f0 < 285 ? 'male' : 'female';

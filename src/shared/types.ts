@@ -226,6 +226,7 @@ export interface SongImportSpec { path: string; language: string | null; cleanup
 export interface RewriteSpec { theme: string; matureDark: boolean; text?: string; language?: string }
 
 export interface RewriteResult {
+  language?: string;
   title: string;
   text: string;
   warnings: string[];

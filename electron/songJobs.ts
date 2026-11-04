@@ -17,7 +17,7 @@ import { runWorker, toolArgs, type WorkerConfig } from './voiceWorker';
 import { DEFAULT_PARAMS, KEYS } from '../src/shared/catalog';
 import { sanitizeLyrics } from '../src/shared/lyrics';
 import {
-  applyCleanup, applyRestructure, assembleRewrite, fitScore, mergeStubLines, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, guessGender,
+  applyCleanup, applyRestructure, assembleRewrite, detectLanguage, fitScore, mergeStubLines, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, guessGender,
   parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan, type RewriteCheck,
 } from '../src/shared/song';
 import type {
@@ -65,7 +65,7 @@ function lmError(e: any): Error {
 /** Переписать текст песни на тему: модель пишет уникальные секции, приложение проверяет слоги и собирает песню. */
 export async function rewriteSong(
   lm: LmStudio, s: Settings, song: Song, spec: RewriteSpec, onChunk: (c: LyricsChunk) => void, signal: AbortSignal,
-): Promise<{ title: string; text: string; warnings: string[]; checks: { name: string; target: number; actual: number; level: string }[] }> {
+): Promise<{ language: string; title: string; text: string; warnings: string[]; checks: { name: string; target: number; actual: number; level: string }[] }> {
   const parts = uniqueParts(song.sections, spec.text ?? song.lyrics);
   if (!parts.length) throw new Error('В песне нет распознанных секций с текстом');
   const language = spec.language || song.language;
@@ -103,6 +103,7 @@ export async function rewriteSong(
   const off = checks.filter((c) => c.level === 'bad' && c.actual > 0);
   if (off.length) warnings.push(`Слоги не совпали в: ${off.map((c) => c.part.name).join(', ')} — слова могут не лечь в такт, поправьте вручную`);
   return {
+    language: detectLanguage(clean.text, language),
     title: parsed.title || `${song.title} (новый текст)`,
     text: clean.text,
     warnings,
@@ -299,7 +300,7 @@ export class SongJobs {
     this.set({ detail: 'Проверяем ACE-Step…', progress: 0.02 });
     await this.d.ensureAce((msg, starting) => this.set({ phase: starting ? 'starting' : 'preparing', detail: msg }), signal);
 
-    const language = spec.language || song.language || 'ru';
+    const language = detectLanguage(spec.text, spec.language || song.language || 'ru');
     const lyrics = sanitizeLyrics(spec.text, { allowBacking: false, lang: language }).text;
     const gender = song.gender ?? 'male';
     const vocalTags = `${gender} vocal, single lead vocalist, clear articulate vocals`;

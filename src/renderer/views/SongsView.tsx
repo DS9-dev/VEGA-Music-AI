@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_PARAMS, LANGUAGES } from '../../shared/catalog';
 import { fmtTime, normalizeTag } from '../../shared/lyrics';
-import { budgetLevel, measureBudgets, sectionBudgets, songTrackParams } from '../../shared/song';
+import { budgetLevel, detectLanguage, measureBudgets, sectionBudgets, songTrackParams } from '../../shared/song';
 import type { BackendStatus, JobState, SongItem, SongSection, VoiceItem } from '../../shared/types';
 import { LyricsEditor } from '../components/LyricsEditor';
 import { ImportDialog, RemakeDialog } from '../components/SongDialogs';
@@ -219,7 +219,7 @@ function SongDetail(props: {
   const useNew = tab === 'new' && newText.trim().length > 0;
   const actText = useNew ? newText : text;
   const actTitle = useNew ? newTitle || `${song.title} (новый текст)` : song.title;
-  const actLang = useNew ? newLang : song.language;
+  const actLang = detectLanguage(actText, useNew ? newLang : song.language);
   const toggleGender = async () => {
     const g = song.gender === 'female' ? 'male' : 'female';
     await window.api.songs.update(song.id, { gender: g });

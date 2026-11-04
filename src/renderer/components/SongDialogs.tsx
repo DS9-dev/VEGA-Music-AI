@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { LANGUAGES } from '../../shared/catalog';
 import { fmtTime } from '../../shared/lyrics';
+import { detectLanguage } from '../../shared/song';
 import type { RemakeMethod, SongItem, VoiceCheck, VoiceItem } from '../../shared/types';
 import { IcAlert, IcDisc, IcMic, IcMusic } from '../icons';
 import { Segmented, ToggleRow, useToast } from './ui';
@@ -97,7 +98,7 @@ export function RemakeDialog(props: {
   const [busy, setBusy] = useState(false);
 
   const text = source === 'new' && hasNew ? song.rewrite!.text : song.lyrics;
-  const language = source === 'new' && hasNew ? song.rewrite!.language ?? song.language : song.language;
+  const language = detectLanguage(text, source === 'new' && hasNew ? song.rewrite!.language ?? song.language : song.language);
   const langLabel = LANGUAGES.find((l) => l.code === language)?.label ?? language;
   const start = async () => {
     setBusy(true);

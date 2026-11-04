@@ -285,7 +285,7 @@ ipcMain.handle('songs:rewrite', async (e, id: string, spec: RewriteSpec) => {
   try {
     const song = songs.get(id);
     const r = await rewriteSong(lm, settings.get(), song, spec, (c) => e.sender.send('songs:chunk', c), rewriteAbort.signal);
-    songs.update(id, { rewrite: { theme: spec.theme, title: r.title, text: r.text, matureDark: spec.matureDark, language: spec.language || song.language, createdAt: new Date().toISOString() } });
+    songs.update(id, { rewrite: { theme: spec.theme, title: r.title, text: r.text, matureDark: spec.matureDark, language: r.language, createdAt: new Date().toISOString() } });
     if (settings.get().unloadLyricsModel) void lm.unload(settings.get().lyricsModel).catch(() => false);
     return r;
   } finally { rewriteAbort = null; }
