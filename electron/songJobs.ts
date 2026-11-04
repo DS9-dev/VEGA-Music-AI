@@ -5,7 +5,7 @@
  *  - «новые слова на эту музыку»: ACE-Step (repaint или lego) → новый вокал (+ свой голос) → родной минус;
  *  - анализ стиля через ACE-Step (описание, жанр, темп, тональность).
  */
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { AceClient } from './ace';
@@ -13,12 +13,13 @@ import type { Library } from './library';
 import type { LmStudio } from './lmstudio';
 import type { SongStore } from './songs';
 import type { VoiceStore } from './voices';
-import { runWorker, toolArgs, type WorkerConfig } from './voiceWorker';
+import { applyVoice } from './voiceJobs';
+import { runWorker, toolArgs, type WorkerConfig, type WorkerEvent } from './voiceWorker';
 import { DEFAULT_PARAMS, KEYS } from '../src/shared/catalog';
 import { sanitizeLyrics } from '../src/shared/lyrics';
 import {
   applyCleanup, applyRestructure, assembleRewrite, detectLanguage, fitScore, mergeStubLines, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, guessGender,
-  parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan, type RewriteCheck,
+  parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, type RewriteCheck,
 } from '../src/shared/song';
 import type {
   JobState, LyricsChunk, RemakeSpec, RewriteSpec, Settings, Song, SongImportSpec, SongSection, SongWord, Track,
@@ -300,12 +301,17 @@ export class SongJobs {
     this.set({ detail: 'Проверяем ACE-Step…', progress: 0.02 });
     await this.d.ensureAce((msg, starting) => this.set({ phase: starting ? 'starting' : 'preparing', detail: msg }), signal);
 
+    // без описания стиля ACE-Step сочинит другой жанр — определяем его по самой песне
+    if (!song.caption?.trim() && !song.genres?.length) {
+      this.set({ detail: 'Определяем стиль песни (ACE-Step)…', progress: 0.03 });
+      try { song = await this.analyzeStyle(song.id, signal); } catch (e: any) { if (e?.name === 'AbortError') throw e; }
+    }
+
     const language = detectLanguage(spec.text, spec.language || song.language || 'ru');
     const lyrics = sanitizeLyrics(spec.text, { allowBacking: false, lang: language }).text;
     const gender = song.gender ?? 'male';
     const vocalTags = `${gender} vocal, single lead vocalist, clear articulate vocals`;
     const prompt = [song.caption?.trim(), song.genres?.length && !song.caption ? song.genres.join(', ') : '', vocalTags].filter(Boolean).join(', ');
-    const span = vocalSpan(song);
     const base: Record<string, unknown> = {
       prompt, lyrics, audio_format: s.audioFormat, vocal_language: language, batch_size: spec.variants,
       audio_duration: song.duration, use_cot_caption: false, use_cot_language: false, lm_backend: 'pt',
@@ -314,12 +320,11 @@ export class SongJobs {
     if (song.bpm) base.bpm = Math.round(song.bpm);
     if (song.key) base.key_scale = song.key;
     const lego = spec.method === 'lego';
+    const strength = Math.min(1, Math.max(0.3, spec.coverStrength ?? 0.8));
     const req: Record<string, unknown> = lego
       ? { ...base, task_type: 'lego', track_name: 'vocals', src_audio_path: join(dir, song.instrumental!), model: s.aceBaseModel, inference_steps: 40, guidance_scale: 7, thinking: true }
-      : {
-        ...base, task_type: 'repaint', src_audio_path: join(dir, song.source), model: s.aceModel, inference_steps: s.aceInferenceSteps,
-        repainting_start: span.start, repainting_end: span.end, repaint_mode: 'aggressive', repaint_strength: 1, chunk_mask_mode: 'explicit', thinking: false,
-      };
+      // cover: мелодия, аккорды, ритм и аранжировка — из оригинала, слова — новые
+      : { ...base, task_type: 'cover', src_audio_path: join(dir, song.source), audio_cover_strength: strength, model: s.aceModel, inference_steps: s.aceInferenceSteps, thinking: false };
 
     let taskId: string;
     try {
@@ -329,7 +334,7 @@ export class SongJobs {
       if (lego && /model|not (found|loaded|available|initialized)|init/i.test(msg)) {
         this.set({ phase: 'starting', detail: `Загружаем base-модель ACE-Step (${s.aceBaseModel})… Первый раз — несколько минут` });
         await this.d.ace.init(s.aceBaseModel, s.aceLmModel).catch((ie) => {
-          throw new Error(`Режим «вокал поверх минуса» требует base-модель ACE-Step (${s.aceBaseModel}). Скачайте её в ACE-Step или выберите режим «Перепевка участка».\n\n${String(ie?.message ?? ie).slice(0, 300)}`);
+          throw new Error(`Режим «вокал поверх минуса» требует base-модель ACE-Step (${s.aceBaseModel}). Скачайте её в ACE-Step или выберите «Ремейк с новыми словами».\n\n${String(ie?.message ?? ie).slice(0, 300)}`);
         });
         taskId = await this.d.ace.submit(req);
       } else if (/init/i.test(msg)) {
@@ -339,10 +344,13 @@ export class SongJobs {
       } else throw e;
     }
 
+    const voice = spec.voiceId ? this.d.voices.get(spec.voiceId) : null;
+    const workerJobs = lego ? 1 : (voice ? 1 : 0) + (spec.overlay ? 1 : 0);
     const expected = (lego ? 2.2 : 1) * s.calibration[String(spec.variants) as '1' | '2'] * song.duration + s.calibration.overhead;
+    const genShare = workerJobs ? 0.5 : 0.9;
     const genStart = Date.now();
     let gen = 0;
-    this.set({ phase: 'generating', step: 1, stageLabel: 'Музыка', detail: lego ? 'ACE-Step поёт новый текст поверх минуса' : 'ACE-Step перепевает участок с вокалом', progress: 0.05 });
+    this.set({ phase: 'generating', step: 1, stageLabel: 'Музыка', detail: lego ? 'ACE-Step поёт новый текст поверх минуса' : 'ACE-Step перепевает песню с новыми словами', progress: 0.05 });
     let files: { file: string; seed?: string }[] = [];
     for (;;) {
       await sleep(1000, signal);
@@ -353,76 +361,117 @@ export class SongJobs {
       const real = q?.progress ?? 0;
       const timeFrac = Math.min(0.97, el / expected);
       gen = Math.max(gen, real, real > 0 ? Math.min(timeFrac, real + 0.25) : timeFrac);
-      const eta = Math.max(0, expected - el) + spec.variants * (40 + song.duration * 0.4);
-      this.set({ progress: 0.05 + 0.5 * gen, etaSec: eta > 2 ? Math.round(eta) : null });
+      const eta = Math.max(0, expected - el) + spec.variants * workerJobs * (40 + song.duration * 0.4);
+      this.set({ progress: 0.05 + genShare * gen, etaSec: eta > 2 ? Math.round(eta) : null });
     }
     if (!files.length) throw new Error('ACE-Step не вернул аудио');
 
     const trackId = this.d.library.allocate(spec.title);
-    const originals: Track['variants'] = [];
+    const ace: Track['variants'] = [];
     for (let i = 0; i < files.length; i++) {
       const ext = (files[i].file.match(/\.(mp3|wav|flac|ogg)(?:$|[?&])/i)?.[1] ?? s.audioFormat).toLowerCase();
       const name = `variant-${i + 1}-ace.${ext}`;
       await this.d.ace.download(files[i].file, this.d.library.filePath(trackId, name));
-      originals.push({ file: name, seed: files[i].seed, label: `Вариант ${i + 1} · ACE`, original: true });
+      ace.push({ file: name, seed: files[i].seed, label: `Вариант ${i + 1} · ACE`, original: true });
     }
 
-    this.set({ step: 2, stageLabel: 'Вокал', detail: 'Освобождаем видеопамять…', progress: 0.57 });
-    await this.d.prepareGpu().catch(() => {});
-    const cfg = this.d.worker();
-    const voice = spec.voiceId ? this.d.voices.get(spec.voiceId) : null;
-    const vdir = voice ? this.d.voices.dir(voice.id) : '';
-    const made: Track['variants'] = [];
     const params = {
       ...songTrackParams(song, DEFAULT_PARAMS), language, genres: song.genres?.length ? song.genres : ['Из песни'],
       theme: song.rewrite?.theme ?? '', voiceId: spec.voiceId, voiceShift: spec.voiceShift, variants: spec.variants,
     };
     const track: Track = {
       id: trackId, title: spec.title, createdAt: new Date().toISOString(), params, lyrics, caption: prompt,
-      bpm: song.bpm ?? 0, variants: originals, generationSeconds: 0, voiceName: voice?.name,
+      bpm: song.bpm ?? 0, variants: ace, generationSeconds: 0, voiceName: voice?.name,
     };
+    const finish = (variants: Track['variants'], detail: string) => {
+      this.set({ phase: 'saving', step: 4, stageLabel: 'Сохранение', detail: 'Сохраняем трек в библиотеку…', progress: 0.98 });
+      const used = new Set(variants.map((v) => v.file));
+      for (const a of ace) if (!used.has(a.file)) rmSync(this.d.library.filePath(trackId, a.file), { force: true });
+      // ремейк ACE без своего голоса — основной вариант: variant-N вместо variant-N-ace
+      variants = variants.map((v) => {
+        if (v.original || !v.file.includes('-ace.') || variants.some((x) => x !== v && x.file === v.file)) return v;
+        const file = v.file.replace('-ace.', '.');
+        renameSync(this.d.library.filePath(trackId, v.file), this.d.library.filePath(trackId, file));
+        return { ...v, file };
+      });
+      track.variants = variants;
+      track.generationSeconds = Math.round((Date.now() - this.t0) / 1000);
+      this.d.library.write(track);
+      this.set({ phase: 'done', step: 4, stageLabel: 'Готово', progress: 1, etaSec: null, trackId, detail });
+    };
+
+    // cover без своего голоса и без родного минуса — результат ACE-Step и есть трек
+    if (!workerJobs) {
+      const main = ace.map((a, i) => {
+        const file = a.file.replace('-ace.', '.');
+        renameSync(this.d.library.filePath(trackId, a.file), this.d.library.filePath(trackId, file));
+        return { file, seed: a.seed, label: `Вариант ${i + 1}` };
+      });
+      finish(main, 'Песня перепета с новыми словами');
+      return;
+    }
+
+    this.set({ step: 2, stageLabel: 'Вокал', detail: 'Освобождаем видеопамять…', progress: 0.57 });
+    await this.d.prepareGpu().catch(() => {});
+    const cfg = this.d.worker();
+    const vdir = voice ? this.d.voices.dir(voice.id) : '';
+    const total = ace.length * workerJobs;
+    let done = 0;
+    const onWorker = (label: string) => (e: WorkerEvent) => {
+      if (e.event === 'stage') {
+        const step = e.name === 'mix' ? 3 : 2;
+        this.set({ step, stageLabel: step === 3 ? 'Сведение' : 'Вокал', detail: `${e.text ?? ''}${label}` });
+      }
+      if (e.event === 'progress') this.set({ progress: 0.58 + 0.38 * ((done + (e.value ?? 0)) / total) });
+    };
+    const overlay = async (i: number, out: string, label: string) => {
+      const work = join(tmpdir(), 'vega-song', `overlay_${Date.now()}_${i}`);
+      const args = ['overlay', ...toolArgs(s, cfg.python), '--input', this.d.library.filePath(trackId, ace[i].file),
+        '--instrumental', join(dir, song.instrumental!), '--orig-vocals', join(dir, song.vocals!),
+        '--out', this.d.library.filePath(trackId, out), '--work', work, '--format', s.audioFormat];
+      if (voice) {
+        args.push('--reference', join(vdir, voice.reference!), '--steps', String(s.voiceDiffusionSteps), '--semitones', spec.voiceShift == null ? 'auto' : String(spec.voiceShift));
+        if (voice.f0Median) args.push('--target-f0', String(voice.f0Median));
+        if (voice.checkpoint && voice.config) args.push('--checkpoint', join(vdir, voice.checkpoint), '--config', join(vdir, voice.config));
+      }
+      try { return basename((await runWorker(cfg, args, onWorker(label), signal)).output); } finally { rmSync(work, { recursive: true, force: true }); }
+    };
+
+    const main: Track['variants'] = [];
+    const minus: Track['variants'] = [];
     try {
-      for (let i = 0; i < originals.length; i++) {
-        const work = join(tmpdir(), 'vega-song', `overlay_${Date.now()}_${i}`);
-        const args = ['overlay', ...toolArgs(s, cfg.python), '--input', this.d.library.filePath(trackId, originals[i].file),
-          '--instrumental', join(dir, song.instrumental!), '--orig-vocals', join(dir, song.vocals!),
-          '--out', this.d.library.filePath(trackId, `variant-${i + 1}.${s.audioFormat}`), '--work', work, '--format', s.audioFormat];
-        if (voice) {
-          args.push('--reference', join(vdir, voice.reference!), '--steps', String(s.voiceDiffusionSteps), '--semitones', spec.voiceShift == null ? 'auto' : String(spec.voiceShift));
-          if (voice.f0Median) args.push('--target-f0', String(voice.f0Median));
-          if (voice.checkpoint && voice.config) args.push('--checkpoint', join(vdir, voice.checkpoint), '--config', join(vdir, voice.config));
+      for (let i = 0; i < ace.length; i++) {
+        const n = ace.length > 1 ? ` · вариант ${i + 1} из ${ace.length}` : '';
+        if (lego) {
+          main.push({ file: await overlay(i, `variant-${i + 1}.${s.audioFormat}`, n), seed: ace[i].seed, label: `Вариант ${i + 1}` });
+          done++;
+          continue;
         }
-        const n = originals.length;
-        try {
-          const r = await runWorker(cfg, args, (e) => {
-            if (e.event === 'stage') {
-              const step = e.name === 'mix' ? 3 : 2;
-              this.set({ step, stageLabel: step === 3 ? 'Сведение' : 'Вокал', detail: `${e.text ?? ''}${n > 1 ? ` · вариант ${i + 1} из ${n}` : ''}` });
-            }
-            if (e.event === 'progress') this.set({ progress: 0.58 + 0.38 * ((i + (e.value ?? 0)) / n) });
-          }, signal);
-          made.push({ file: basename(r.output), seed: originals[i].seed, label: `Вариант ${i + 1}` });
-        } finally {
-          rmSync(work, { recursive: true, force: true });
+        if (voice) {
+          const r = await applyVoice(cfg, s, this.d.voices, voice.id, this.d.library.filePath(trackId, ace[i].file),
+            this.d.library.filePath(trackId, `variant-${i + 1}.${s.audioFormat}`), spec.voiceShift, onWorker(n), signal);
+          main.push({ file: basename(r.output), seed: ace[i].seed, label: `Вариант ${i + 1}` });
+          done++;
+        } else main.push({ ...ace[i], label: `Вариант ${i + 1}`, original: undefined });
+        if (spec.overlay) {
+          minus.push({ file: await overlay(i, `variant-${i + 1}-minus.${s.audioFormat}`, n), seed: ace[i].seed, label: `Вариант ${i + 1} · родной минус` });
+          done++;
         }
       }
     } catch (e: any) {
       if (e?.name === 'AbortError') throw e;
       // ACE-Step уже отработал — не теряем результат
+      track.variants = [...main, ...minus, ...ace.filter((a) => !main.some((m) => m.file === a.file))];
       track.generationSeconds = Math.round((Date.now() - this.t0) / 1000);
       this.d.library.write(track);
-      this.set({ phase: 'error', stageLabel: 'Ошибка сведения', trackId, etaSec: null,
-        error: `Не удалось свести новый вокал с исходной музыкой. Результат ACE-Step сохранён в библиотеке.\n\n${e?.message ?? e}` });
+      this.set({ phase: 'error', stageLabel: 'Ошибка обработки', trackId, etaSec: null,
+        error: `Не удалось обработать вокал. Результат ACE-Step сохранён в библиотеке.\n\n${e?.message ?? e}` });
       return;
     }
-
-    this.set({ phase: 'saving', step: 4, stageLabel: 'Сохранение', detail: 'Сохраняем трек в библиотеку…', progress: 0.98 });
-    track.variants = spec.keepAce ? [...made, ...originals] : made;
-    track.generationSeconds = Math.round((Date.now() - this.t0) / 1000);
-    if (!spec.keepAce) for (const o of originals) rmSync(this.d.library.filePath(trackId, o.file), { force: true });
-    this.d.library.write(track);
-    this.set({ phase: 'done', step: 4, stageLabel: 'Готово', progress: 1, etaSec: null, trackId, detail: 'Новый вокал сведён с исходной музыкой' });
+    const keep = spec.keepAce && (lego || !!voice) ? ace : [];
+    finish([...main, ...minus, ...keep], lego ? 'Новый вокал сведён с исходной музыкой' : 'Песня перепета с новыми словами');
   }
+
 }
 
 /** Ищет в ответе анализа ACE-Step описание, жанр, темп и тональность (формат зависит от версии). */

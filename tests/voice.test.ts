@@ -2,7 +2,7 @@
  * Голосовые модели (V2): настоящий voice/vega_voice.py + имитации Seed-VC, MelBand-RoFormer и ACE-Step.
  * Нужен Python с numpy и scipy. На Windows и без Python тест пропускается (setup_app.bat его не требует).
  */
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, truncateSync, writeFileSync } from 'node:fs';
@@ -350,7 +350,7 @@ test('переписывание: пропущенная секция допис
   assert.ok(!r.warnings.some((w) => /не написала/.test(w)), r.warnings.join('; '));
 });
 
-test('новые слова на эту музыку: repaint и lego → новый вокал → родной минус', { skip: !hasPy && 'нет Python' }, async () => {
+test('новые слова на эту музыку: ремейк (cover) и lego → новый вокал → родной минус', { skip: !hasPy && 'нет Python' }, async () => {
   const { s, store, library, worker, song, songs, root } = songSetup();
   const voiceJobs = new VoiceJobs({ store, library, settings: () => s, worker, prepareGpu: async () => {}, gpuBusy: () => false, onUpdate: () => {} });
   const vid = voiceJobs.create({ name: 'Солист', gender: 'male', sources: [{ path: song, kind: 'clean' }], profile: 'zero', consent: true });
@@ -388,24 +388,26 @@ test('новые слова на эту музыку: repaint и lego → нов
     store: songs, library, voices: store, lm: fakeLm(['']) as any, ace: new AceClient(() => s.aceEndpoint), settings: () => s, worker,
     ensureAce: async () => {}, prepareGpu: async () => {}, unloadLlm: async () => {}, gpuBusy: () => false, onUpdate: () => {},
   });
+  after(() => server.close());
   const id = jobs.importSong({ path: song, language: 'ru', cleanup: false });
   await waitJob(() => jobs.state);
   const text = '[Chorus]\nСнег идёт и тает снег\n[Verse 1]\nНовый куплет\n[Chorus]\nСнег идёт и тает снег';
 
-  jobs.remake({ songId: id, text, title: 'Снег', method: 'repaint', voiceId: null, voiceShift: null, variants: 1, keepAce: true });
+  jobs.remake({ songId: id, text, title: 'Снег', method: 'cover', voiceId: null, voiceShift: null, variants: 1, keepAce: true, coverStrength: 0.8, overlay: true });
   let fin = await waitJob(() => jobs.state);
   assert.equal(fin.phase, 'done', fin.error ?? '');
   const rp = bodies.at(-1);
-  assert.equal(rp.task_type, 'repaint');
+  assert.equal(rp.task_type, 'cover');
+  assert.equal(rp.audio_cover_strength, '0.8');
   assert.equal(rp.src_audio_path, undefined, 'абсолютный путь не отправляется — ACE-Step его запрещает');
   assert.equal(rp.__file, 'source.wav');
   assert.ok(rp.__fileBytes > 1_000_000, 'аудио загружено в запросе');
-  const rs = Number(rp.repainting_start), re = Number(rp.repainting_end);
-  assert.ok(rs > 0 && rs < 1 && re > 26 && re <= 30.1, `${rs}–${re}`);
+  assert.ok(bodies.some((b) => b.full_analysis_only === 'true'), 'без описания стиля — сначала анализ песни');
   assert.match(rp.prompt, /male vocal/);
   assert.match(rp.lyrics, /Снег идёт/);
   let t = library.read(fin.trackId!);
-  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1', 'Вариант 1 · ACE']);
+  assert.deepEqual(t.variants.map((v) => v.label), ['Вариант 1', 'Вариант 1 · родной минус'], 'без своего голоса ремейк ACE и есть вариант 1');
+  assert.equal(t.variants[0].file, 'variant-1.wav');
   for (const v of t.variants) assert.ok(existsSync(library.filePath(t.id, v.file)), v.file);
 
   jobs.remake({ songId: id, text, title: 'Снег 2', method: 'lego', voiceId: vid, voiceShift: null, variants: 1, keepAce: false });

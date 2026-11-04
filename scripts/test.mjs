@@ -20,5 +20,5 @@ await build({
   external: ['electron'],
   logLevel: 'warning',
 });
-const r = spawnSync(process.execPath, ['--test', ...files.map((f) => join(out, f.replace(/\.ts$/, '.mjs')))], { stdio: 'inherit' });
+const r = spawnSync(process.execPath, ['--test', '--test-force-exit', ...files.map((f) => join(out, f.replace(/\.ts$/, '.mjs')))], { stdio: 'inherit' });
 process.exit(r.status ?? 1);

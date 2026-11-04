@@ -233,7 +233,7 @@ export interface RewriteResult {
   checks: { name: string; target: number; actual: number; level: string }[];
 }
 
-export type RemakeMethod = 'repaint' | 'lego';
+export type RemakeMethod = 'cover' | 'lego';
 
 export interface RemakeSpec {
   songId: string;
@@ -245,6 +245,8 @@ export interface RemakeSpec {
   variants: 1 | 2;
   keepAce: boolean; // сохранять исходный вокал ACE-Step рядом
   language?: string; // язык текста (по умолчанию — язык песни)
+  coverStrength?: number; // 0.3–1: насколько близко к оригиналу (cover)
+  overlay?: boolean; // ещё и свести новый вокал с родным минусом
 }
 
 export interface SectionBudget { tag: string; group?: string; start: number; end: number; target: number; original: number; actual?: number }

@@ -4,7 +4,7 @@ import { fmtTime } from '../../shared/lyrics';
 import { detectLanguage } from '../../shared/song';
 import type { RemakeMethod, SongItem, VoiceCheck, VoiceItem } from '../../shared/types';
 import { IcAlert, IcDisc, IcMic, IcMusic } from '../icons';
-import { Segmented, ToggleRow, useToast } from './ui';
+import { Range, Segmented, ToggleRow, useToast } from './ui';
 import { Modal, ShiftPicker } from './VoiceDialogs';
 
 const errText = (e: unknown) => String((e as Error)?.message ?? e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
@@ -72,8 +72,8 @@ export function ImportDialog(props: { path: string; lmOnline: boolean; onClose: 
 }
 
 const METHODS: { id: RemakeMethod; title: string; desc: string; badge?: string }[] = [
-  { id: 'repaint', title: 'Перепевка участка', desc: 'Работает на вашей turbo-модели. ACE-Step перепевает участок с голосом, из результата берётся только новый вокал.', badge: 'рекомендуем' },
-  { id: 'lego', title: 'Вокал поверх минуса', desc: 'Вокал рождается сразу под минус — точнее попадает в музыку. Нужна base-модель ACE-Step (≈ 10 ГБ), дольше.' },
+  { id: 'cover', title: 'Ремейк с новыми словами', desc: 'ACE-Step перепевает всю песню с новым текстом, сохраняя мелодию, аккорды, ритм и аранжировку оригинала. Работает на turbo-модели.', badge: 'рекомендуем' },
+  { id: 'lego', title: 'Вокал поверх минуса', desc: 'Новый вокал генерируется под родной минус песни. Нужна base-модель ACE-Step (≈ 10 ГБ), дольше и капризнее.' },
 ];
 
 /** «Новые слова на эту музыку»: текст, способ, голос. */
@@ -89,7 +89,9 @@ export function RemakeDialog(props: {
   const hasNew = !!song.rewrite?.text.trim();
   const [source, setSource] = useState<'new' | 'orig'>(hasNew ? props.initialSource : 'orig');
   const [title, setTitle] = useState(hasNew && props.initialSource === 'new' ? song.rewrite!.title : `${song.title} (новый вокал)`);
-  const [method, setMethod] = useState<RemakeMethod>('repaint');
+  const [method, setMethod] = useState<RemakeMethod>('cover');
+  const [strength, setStrength] = useState(80);
+  const [overlay, setOverlay] = useState(false);
   const usable = props.voices.filter((v) => v.usable);
   const [voiceId, setVoiceId] = useState<string>('');
   const [shift, setShift] = useState<number | null>(null);
@@ -103,7 +105,7 @@ export function RemakeDialog(props: {
   const start = async () => {
     setBusy(true);
     try {
-      await window.api.songs.remake({ songId: song.id, text, title, method, voiceId: voiceId || null, voiceShift: shift, variants, keepAce, language });
+      await window.api.songs.remake({ songId: song.id, text, title, method, voiceId: voiceId || null, voiceShift: shift, variants, keepAce, language, coverStrength: strength / 100, overlay: method === 'cover' && overlay });
       props.onStarted();
     } catch (e) { toast('err', errText(e)); setBusy(false); }
   };
@@ -138,8 +140,15 @@ export function RemakeDialog(props: {
             </button>
           ))}
         </div>
-        <div className="dim" style={{ fontSize: 12.5, marginTop: 8 }}>В обоих случаях музыка — родной минус песни, а новый вокал сводится с ним по громкости оригинала.</div>
       </div>
+      {method === 'cover' && (
+        <div className="field">
+          <div className="label">Близость к оригиналу <span className="value">{strength}%</span></div>
+          <Range value={strength} min={50} max={100} step={5} onChange={setStrength} />
+          <div className="range-scale"><span>свободнее</span><span>как в оригинале</span></div>
+          <div className="dim" style={{ fontSize: 12.5 }}>70–90% — музыка узнаваема, а новые слова поются свободно. Ближе к 100% ACE-Step может «прорастать» старым текстом.</div>
+        </div>
+      )}
 
       <div className="grid2">
         <div className="field">
@@ -160,9 +169,17 @@ export function RemakeDialog(props: {
           <ShiftPicker compact value={shift} onChange={setShift} />
         </div>
       )}
-      <div className="field">
-        <ToggleRow on={keepAce} onChange={setKeepAce} title="Сохранить и вариант ACE-Step как есть" desc="Рядом в библиотеке будет результат ACE-Step до сведения с родным минусом" />
-      </div>
+      {method === 'cover' && (
+        <div className="field">
+          <ToggleRow on={overlay} onChange={setOverlay} title="Также свести новый вокал с родным минусом"
+            desc="Дополнительный вариант: вокал из ремейка кладётся на оригинальную музыку. Звучит лучше, если близость к оригиналу высокая" />
+        </div>
+      )}
+      {(method === 'lego' || voiceId) && (
+        <div className="field">
+          <ToggleRow on={keepAce} onChange={setKeepAce} title="Сохранить и вариант ACE-Step как есть" desc="Рядом в библиотеке будет результат ACE-Step до обработки" />
+        </div>
+      )}
     </Modal>
   );
 }

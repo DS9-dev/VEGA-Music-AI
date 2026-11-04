@@ -356,7 +356,7 @@ function SongDetail(props: {
           <div className="card song-action hot">
             <div className="sa-ic"><IcDisc size={18} /></div>
             <h4>Новые слова на эту музыку</h4>
-            <p>ACE-Step споёт {useNew ? 'новый текст' : 'текст'} на исходную музыку: новый вокал ложится на родной минус песни.</p>
+            <p>ACE-Step перепоёт песню с {useNew ? 'новым текстом' : 'этим текстом'}, сохраняя мелодию, аккорды и аранжировку оригинала.</p>
             <button className="btn primary" disabled={!actText.trim() || streaming} onClick={() => setRemake(true)}><IcMic size={15} /> Спеть на эту музыку</button>
           </div>
           <div className="card song-action">
