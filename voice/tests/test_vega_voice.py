@@ -261,6 +261,36 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue((self.tmp / "voice" / "model" / "config.yml").is_file())
         self.assertFalse((self.tmp / "voice" / "runs").exists(), "промежуточные чекпойнты удалены")
 
+    def test_train_cyrillic_voice_name(self):
+        # Seed-VC на Windows читает config.yml в ANSI — имитируем это: кириллица в log_dir испортилась бы
+        (self.seed / "train.py").write_text(FAKE_TRAIN.replace('open(a.config, encoding="utf-8")', 'open(a.config, encoding="cp1251", errors="replace")'), encoding="utf-8")
+        out = self.tmp / "В-духе-Тиля"
+        ds = out / "dataset"
+        ds.mkdir(parents=True)
+        vv.write_audio(ds / "a.wav", tone(200, 3), SR)
+        pre = self.tmp / "pre.pth"; pre.write_bytes(b"p")
+        code, ev, err = run_worker("train", "--seedvc", str(self.seed), "--seedvc-python", sys.executable,
+                                   "--dataset", str(ds), "--out", str(out), "--steps", "30", "--pretrained", str(pre))
+        self.assertEqual(code, 0, err + str(ev[-1:]))
+        self.assertTrue((out / "model" / "ft_model.pth").is_file())
+        self.assertEqual([p.name for p in self.tmp.iterdir() if p.name.startswith("Р")], [], "нет папки с испорченным именем")
+        self.assertFalse(any((self.seed / "runs_vega").glob("voice_*")), "временная папка обучения убрана")
+
+    def test_train_adopts_model_lost_by_old_version(self):
+        (self.seed / "train.py").write_text("import sys; sys.exit(3)", encoding="utf-8")  # обучение не должно запускаться
+        out = self.tmp / "В-духе-Тиля"
+        (out / "dataset").mkdir(parents=True)
+        vv.write_audio(out / "dataset" / "a.wav", tone(200, 3), SR)
+        lost = Path(str(out / "runs").encode("utf-8").decode("cp1251")) / "voice"
+        lost.mkdir(parents=True)
+        (lost / "ft_model.pth").write_bytes(b"m" * 5000)
+        code, ev, err = run_worker("train", "--seedvc", str(self.seed), "--seedvc-python", sys.executable,
+                                   "--dataset", str(out / "dataset"), "--out", str(out), "--steps", "800")
+        self.assertEqual(code, 0, err + str(ev[-1:]))
+        self.assertTrue(ev[-1]["result"]["adopted"])
+        self.assertEqual((out / "model" / "ft_model.pth").stat().st_size, 5000)
+        self.assertFalse(lost.parent.exists(), "папка с испорченным именем удалена")
+
     def test_apply(self):
         ref = vv.write_audio(self.tmp / "ref.wav", tone(196, 5), SR)
         out = self.tmp / "result" / "variant-1.mp3"

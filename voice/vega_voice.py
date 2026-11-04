@@ -538,15 +538,81 @@ def derive_config(seedvc: str, run_root: Path, target: Path) -> Path:
 STEP_RE = re.compile(r"step\s+(\d+),\s*loss:\s*([0-9.eE+-]+)")
 
 
+def _ascii(path: Path) -> bool:
+    try:
+        str(path).encode("ascii")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def train_root(seedvc: str, out: Path) -> Path:
+    """
+    Папка для запуска обучения только из латиницы: Seed-VC на Windows читает config.yml в кодировке ANSI,
+    и кириллический путь в log_dir превращается в «кракозябры» — модель сохраняется не туда.
+    """
+    import tempfile
+    for cand in (Path(seedvc) / "runs_vega", Path(tempfile.gettempdir()) / "vega_runs", Path(out.anchor or "/") / "vega_runs", out / "runs"):
+        if _ascii(cand):
+            return cand
+    return out / "runs"
+
+
+def _mangled(path: Path) -> list[Path]:
+    """Как путь выглядит после неверной кодировки (UTF-8, прочитанный как ANSI)."""
+    import locale
+    out = []
+    for enc in dict.fromkeys([locale.getpreferredencoding(False) or "cp1251", "cp1251", "cp1252"]):
+        try:
+            m = Path(str(path).encode("utf-8").decode(enc))
+        except (UnicodeDecodeError, LookupError):
+            continue
+        if m != path:
+            out.append(m)
+    return out
+
+
+def find_lost_model(out: Path, run_name: str = "voice") -> Path | None:
+    """Модель, которую прежняя версия сохранила в папку с испорченным именем."""
+    for root in _mangled(out / "runs"):
+        f = root / run_name / "ft_model.pth"
+        if f.is_file() and f.stat().st_size > 1000:
+            return f
+    return None
+
+
+def steps_hint(args) -> int:
+    return int(getattr(args, "steps", 0) or 0)
+
+
 def cmd_train(args) -> dict:
     out = Path(args.out)
     dataset = Path(args.dataset)
     files = [f for f in dataset.glob("*") if f.suffix.lower() in AUDIO_EXT]
     if not files:
         raise WorkerError("Датасет пуст — сначала подготовьте голос")
-    runs = out / "runs"
-    run_name = "voice"
-    config = derive_config(args.seedvc, runs, out / "model" / "config.yml")
+    model_dir = out / "model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    # обучение, сохранённое прежней версией в папку с испорченным именем, — подхватываем без повторного обучения
+    lost = find_lost_model(out)
+    if lost and not args.no_adopt:
+        stage("train", "Нашли уже обученную модель")
+        progress(0.5, "Переносим ранее обученную модель")
+        shutil.move(str(lost), str(model_dir / "ft_model.pth"))
+        shutil.rmtree(lost.parent.parent, ignore_errors=True)  # …\runs с испорченным именем
+        try:
+            lost.parent.parent.parent.rmdir()  # и пустая папка над ней
+        except OSError:
+            pass
+        derive_config(args.seedvc, out / "runs", model_dir / "config.yml")
+        progress(1.0, "Готово")
+        return {"checkpoint": "model/ft_model.pth", "config": "model/config.yml", "steps": steps_hint(args),
+                "finalLoss": None, "seconds": 0, "adopted": True}
+    import hashlib
+    runs = train_root(args.seedvc, out)
+    run_name = "voice_" + hashlib.sha1(str(out.resolve()).encode("utf-8")).hexdigest()[:10]
+    derive_config(args.seedvc, runs, model_dir / "config.yml")
+    config = derive_config(args.seedvc, runs, runs / f"{run_name}.yml")
     run_dir = runs / run_name
     resuming = bool(glob.glob(str(run_dir / "DiT_epoch_*_step_*.pth")))
     steps = int(args.steps)
@@ -575,13 +641,18 @@ def cmd_train(args) -> dict:
     run_logged(cmd, args.seedvc, seedvc_env(args), on_line, str(out / "train.log"))
     final = run_dir / "ft_model.pth"
     if not final.is_file():
+        final = find_lost_model(out, run_name) or final
+    if not final.is_file():
         raise WorkerError("Обучение завершилось без файла ft_model.pth — см. train.log")
-    model_dir = out / "model"
-    model_dir.mkdir(parents=True, exist_ok=True)
     shutil.move(str(final), str(model_dir / "ft_model.pth"))
     # промежуточные чекпойнты с оптимизатором весят гигабайты — удаляем
     if not args.keep_checkpoints:
-        shutil.rmtree(runs, ignore_errors=True)
+        shutil.rmtree(run_dir, ignore_errors=True)
+        try:
+            (runs / f"{run_name}.yml").unlink()
+            runs.rmdir()  # только если пусто
+        except OSError:
+            pass
     return {"checkpoint": "model/ft_model.pth", "config": "model/config.yml", "steps": steps,
             "finalLoss": last["loss"], "seconds": round(time.time() - t0)}
 
@@ -1115,6 +1186,7 @@ def main(argv=None) -> int:
     sp.add_argument("--dataset", required=True); sp.add_argument("--out", required=True)
     sp.add_argument("--steps", type=int, default=800); sp.add_argument("--batch", type=int, default=2)
     sp.add_argument("--pretrained", default=""); sp.add_argument("--keep-checkpoints", action="store_true")
+    sp.add_argument("--no-adopt", action="store_true")
 
     sp = sub.add_parser("apply"); common(sp)
     sp.add_argument("--input", required=True); sp.add_argument("--out", required=True)
