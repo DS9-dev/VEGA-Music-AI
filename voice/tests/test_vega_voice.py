@@ -151,6 +151,21 @@ class MusicAnalysisTests(unittest.TestCase):
                                   chord_pad([329.6, 415.3, 493.9], 2), chord_pad([220.0, 261.6, 329.6], 4)])
         self.assertEqual(vv.estimate_key(a_minor, SR), "A minor")
 
+    def test_fill_gaps_relistens_missed_vocals(self):
+        sr = 16000
+        x = np.concatenate([tone(200, 4, sr), np.zeros(sr, np.float32), tone(200, 4, sr), np.zeros(sr, np.float32), tone(200, 3, sr)])
+        words = [{"w": "раз", "s": 0.2, "e": 3.8}]  # второй и третий участки «пропущены»
+        calls = []
+
+        def run_chunk(part):
+            calls.append(len(part) / sr)
+            return [{"w": "спасибо", "s": 0.4, "e": 1.0}] if len(calls) == 2 else [{"w": "два", "s": 0.5, "e": 1.2}, {"w": "три", "s": 1.4, "e": 2.0}]
+
+        out = vv.fill_gaps(x, words, run_chunk, sr)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([w["w"] for w in out], ["раз", "два", "три"], "галлюцинация «спасибо» отброшена")
+        self.assertTrue(4.5 < out[1]["s"] < 5.6)
+
     def test_language_guess(self):
         self.assertEqual(vv.guess_language("Ночь моя неоновая"), "ru")
         self.assertEqual(vv.guess_language("Їжак і ґанок"), "uk")

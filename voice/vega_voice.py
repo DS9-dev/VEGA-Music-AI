@@ -710,7 +710,7 @@ def asr_available() -> str | None:
         return None
 
 
-def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float) -> tuple[list[dict], str]:
+def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float):
     _torch_dll_dirs()
     from faster_whisper import WhisperModel  # type: ignore
     root = args.asr_models or None
@@ -727,9 +727,9 @@ def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float) -> tup
         model = WhisperModel(args.asr_model, device="cpu", compute_type="int8", download_root=root)
     lang = None if args.language in ("", "auto") else args.language
 
-    def run(vad: bool):
+    def run(vad: bool, audio=None, language=None, report=True):
         segments, info = model.transcribe(
-            audio16, language=lang, task="transcribe", beam_size=5, word_timestamps=True,
+            audio16 if audio is None else audio, language=language or lang, task="transcribe", beam_size=5, word_timestamps=True,
             vad_filter=vad, vad_parameters={"min_silence_duration_ms": 700, "speech_pad_ms": 300, "threshold": 0.3} if vad else None,
             condition_on_previous_text=False, no_speech_threshold=0.6, compression_ratio_threshold=2.4,
             temperature=[0.0, 0.2, 0.4],
@@ -740,7 +740,8 @@ def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float) -> tup
                 t = (w.word or "").strip()
                 if t:
                     words.append({"w": t, "s": round(float(w.start), 2), "e": round(float(w.end), 2)})
-            progress(0.45 + 0.5 * min(1.0, float(seg.end) / max(1.0, duration)), f"Распознаём слова · {fmt_time(seg.end)} из {fmt_time(duration)}")
+            if report:
+                progress(0.45 + 0.4 * min(1.0, float(seg.end) / max(1.0, duration)), f"Распознаём слова · {fmt_time(seg.end)} из {fmt_time(duration)}")
         return words, info.language
 
     try:
@@ -754,10 +755,11 @@ def transcribe_faster_whisper(audio16: np.ndarray, args, duration: float) -> tup
             words, detected = run(True)
         else:
             raise
-    return words, (lang or detected or "")
+    final_lang = lang or detected or ""
+    return words, final_lang, lambda chunk: run(False, chunk, final_lang or None, False)[0]
 
 
-def transcribe_transformers(audio16: np.ndarray, args, duration: float) -> tuple[list[dict], str]:
+def transcribe_transformers(audio16: np.ndarray, args, duration: float):
     import torch  # type: ignore
     from transformers import pipeline  # type: ignore
     name = args.asr_model if "/" in args.asr_model else f"openai/whisper-{args.asr_model}"
@@ -769,14 +771,10 @@ def transcribe_transformers(audio16: np.ndarray, args, duration: float) -> tuple
     gen = {"task": "transcribe"}
     if lang:
         gen["language"] = lang
-    words: list[dict] = []
-    chunk = 30 * 16000
-    for i0 in range(0, len(audio16), chunk):
-        part = audio16[i0:i0 + chunk]
-        if rms_db(part) < -50:
-            continue
+
+    def run_part(part: np.ndarray, off: float) -> list[dict]:
         out = pipe({"raw": part, "sampling_rate": 16000}, return_timestamps="word", generate_kwargs=gen)
-        off = i0 / 16000
+        res = []
         for c in out.get("chunks", []):
             ts = c.get("timestamp") or (None, None)
             t = (c.get("text") or "").strip()
@@ -784,10 +782,58 @@ def transcribe_transformers(audio16: np.ndarray, args, duration: float) -> tuple
                 continue
             s = float(ts[0]) + off
             e = float(ts[1]) + off if ts[1] is not None else s + 0.3
-            words.append({"w": t, "s": round(s, 2), "e": round(e, 2)})
-        progress(0.45 + 0.5 * min(1.0, (i0 + chunk) / max(1, len(audio16))), f"Распознаём слова · {fmt_time((i0 + chunk) / 16000)} из {fmt_time(duration)}")
+            res.append({"w": t, "s": round(s, 2), "e": round(e, 2)})
+        return res
+
+    words: list[dict] = []
+    chunk = 30 * 16000
+    for i0 in range(0, len(audio16), chunk):
+        part = audio16[i0:i0 + chunk]
+        if rms_db(part) < -50:
+            continue
+        words += run_part(part, i0 / 16000)
+        progress(0.45 + 0.4 * min(1.0, (i0 + chunk) / max(1, len(audio16))), f"Распознаём слова · {fmt_time((i0 + chunk) / 16000)} из {fmt_time(duration)}")
     text = " ".join(w["w"] for w in words)
-    return words, (lang or guess_language(text))
+    return words, (lang or guess_language(text)), lambda part: run_part(part, 0.0)
+
+
+HALLUCINATION_RE = re.compile(r"^(thank you|thanks|bye|bye-bye|you|music|пока|спасибо|музыка)[.!\s]*$|субтитр|продолжение следует|amara\.org|subscribe", re.I)
+
+
+def fill_gaps(audio16: np.ndarray, words: list[dict], run_chunk, sr: int = 16000, max_regions: int = 40) -> list[dict]:
+    """
+    Whisper пропускает повторы и затухание в конце. Участки, где голос звучит, а слов почти нет,
+    распознаются отдельно, найденные слова добавляются.
+    """
+    regions = voiced_regions(audio16, sr, top_db=32, min_gap=0.6)
+    gaps = []
+    for s0, e0 in regions:
+        a, b = s0 / sr, e0 / sr
+        if b - a < 1.2:
+            continue
+        covered = sum(max(0.0, min(b, w["e"]) - max(a, w["s"])) for w in words if w["e"] > a and w["s"] < b)
+        if covered / (b - a) < 0.25:
+            gaps.append((max(0.0, a - 0.3), min(len(audio16) / sr, b + 0.3)))
+    gaps = gaps[:max_regions]
+    added: list[dict] = []
+    for i, (a, b) in enumerate(gaps):
+        progress(0.86 + 0.12 * (i / max(1, len(gaps))), f"Дослушиваем пропуски · {i + 1} из {len(gaps)}")
+        try:
+            found = run_chunk(audio16[int(a * sr):int(b * sr)])
+        except Exception as e:  # noqa: BLE001
+            emit("log", text=f"Не удалось дослушать {fmt_time(a)}–{fmt_time(b)}: {e}")
+            continue
+        text = " ".join(w["w"] for w in found).strip().lower()
+        if not text or HALLUCINATION_RE.search(text):
+            continue
+        for w in found:
+            ws, we = w["s"] + a, w["e"] + a
+            if any(x["s"] < we and x["e"] > ws for x in words):
+                continue
+            added.append({"w": w["w"], "s": round(ws, 2), "e": round(we, 2)})
+    if added:
+        emit("log", text=f"Дослушано слов: {len(added)}")
+    return sorted(words + added, key=lambda w: w["s"])
 
 
 def fmt_time(sec: float) -> str:
@@ -809,8 +855,8 @@ def transcribe(vocals: str, args, duration: float) -> tuple[list[dict], str, str
     if backend in ("auto", "faster-whisper"):
         try:
             import faster_whisper  # type: ignore  # noqa: F401
-            words, lang = transcribe_faster_whisper(audio16, args, duration)
-            return words, lang, "faster-whisper"
+            words, lang, chunk_fn = transcribe_faster_whisper(audio16, args, duration)
+            return fill_gaps(audio16, words, chunk_fn), lang, "faster-whisper"
         except ImportError:
             if backend == "faster-whisper":
                 raise WorkerError("Не установлен faster-whisper. Установите его в окружение Seed-VC: .venv\\Scripts\\pip install faster-whisper")
@@ -818,8 +864,8 @@ def transcribe(vocals: str, args, duration: float) -> tuple[list[dict], str, str
         import transformers  # type: ignore  # noqa: F401
     except ImportError:
         raise WorkerError("Нет модуля распознавания речи. Установите faster-whisper в окружение Seed-VC: .venv\\Scripts\\pip install faster-whisper")
-    words, lang = transcribe_transformers(audio16, args, duration)
-    return words, lang, "transformers"
+    words, lang, chunk_fn = transcribe_transformers(audio16, args, duration)
+    return fill_gaps(audio16, words, chunk_fn), lang, "transformers"
 
 
 def cmd_analyze(args) -> dict:

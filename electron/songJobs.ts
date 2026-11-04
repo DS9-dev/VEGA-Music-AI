@@ -5,7 +5,7 @@
  *  - «новые слова на эту музыку»: ACE-Step (repaint или lego) → новый вокал (+ свой голос) → родной минус;
  *  - анализ стиля через ACE-Step (описание, жанр, темп, тональность).
  */
-import { copyFileSync, existsSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, extname, join } from 'node:path';
 import type { AceClient } from './ace';
@@ -17,11 +17,11 @@ import { runWorker, toolArgs, type WorkerConfig } from './voiceWorker';
 import { DEFAULT_PARAMS, KEYS } from '../src/shared/catalog';
 import { sanitizeLyrics } from '../src/shared/lyrics';
 import {
-  applyCleanup, assembleRewrite, buildLines, buildSections, checkRewrite, cleanupMessages, fixMessage, guessGender,
+  applyCleanup, applyRestructure, assembleRewrite, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, fixMessage, guessGender,
   parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan, type RewriteCheck,
 } from '../src/shared/song';
 import type {
-  JobState, LyricsChunk, RemakeSpec, RewriteSpec, Settings, Song, SongImportSpec, SongWord, Track,
+  JobState, LyricsChunk, RemakeSpec, RewriteSpec, Settings, Song, SongImportSpec, SongSection, SongWord, Track,
 } from '../src/shared/types';
 
 export interface SongDeps {
@@ -191,15 +191,11 @@ export class SongJobs {
     if (spec.cleanup && s.songLlmCleanup && lines.length && (await this.d.lm.isOnline())) {
       try {
         this.set({ detail: 'Исправляем распознанный текст моделью…' });
-        let chars = 0;
-        const raw = await this.d.lm.streamChat(
-          { model: s.lyricsModel, messages: cleanupMessages(sections, language), temperature: 0.2, max_tokens: 5000 },
-          (full) => { chars = full.length; this.set({ progress: Math.min(0.97, 0.8 + 0.17 * Math.min(1, chars / (recognized.length * 1.2 + 200))) }); },
-          signal,
-        ).catch((e) => { throw lmError(e); });
-        const res = applyCleanup(sections, raw);
+        const res = await this.fixWithModel(sections, words, language, r.duration, bpm, signal, (chars) => {
+          this.set({ progress: Math.min(0.97, 0.8 + 0.17 * Math.min(1, chars / (recognized.length * 1.2 + 200))) });
+        });
         sections = res.sections;
-        if (!res.fixedBlocks) warnings.push('Модель не смогла исправить текст — показан текст как распознан');
+        if (!res.ok) warnings.push('Модель не смогла исправить текст — показан текст как распознан');
         if (s.unloadLyricsModel) await this.d.unloadLlm().catch(() => {});
       } catch (e: any) {
         if (e?.name === 'AbortError') throw e;
@@ -222,16 +218,32 @@ export class SongJobs {
     });
   }
 
+  /**
+   * Исправление моделью: сначала модель заново делит текст на строки и секции (время — по словам Whisper),
+   * если ответ слишком далёк от распознанного — исправляются только слова в прежних строках.
+   */
+  private async fixWithModel(sections: SongSection[], words: SongWord[], language: string, duration: number, bpm: number | null,
+    signal: AbortSignal, onChars: (n: number) => void = () => {}): Promise<{ sections: SongSection[]; ok: boolean }> {
+    const s = this.d.settings();
+    const ask = (messages: { role: string; content: string }[]) => this.d.lm.streamChat(
+      { model: s.lyricsModel, messages, temperature: 0.2, max_tokens: 6000 }, (full) => onChars(full.length), signal,
+    ).catch((e) => { throw lmError(e); });
+    if (words.length) {
+      const restructured = applyRestructure(words, await ask(restructureMessages(sections, language)), duration, bpm);
+      if (restructured && restructured.some((x) => x.kind === 'vocal')) return { sections: restructured, ok: true };
+    }
+    const res = applyCleanup(sections, await ask(cleanupMessages(sections, language)));
+    return { sections: res.sections, ok: res.fixedBlocks > 0 };
+  }
+
   /** Повторно исправить текст моделью (по текущим правкам). */
   async cleanup(id: string, signal: AbortSignal): Promise<Song> {
-    const s = this.d.settings();
     const song = this.d.store.get(id);
     const sections = sectionsWithText(song.sections, song.lyrics);
-    const raw = await this.d.lm.streamChat(
-      { model: s.lyricsModel, messages: cleanupMessages(sections, song.language), temperature: 0.2, max_tokens: 5000 }, () => {}, signal,
-    ).catch((e) => { throw lmError(e); });
-    const res = applyCleanup(sections, raw);
-    if (!res.fixedBlocks) throw new Error('Модель вернула текст в неожиданном виде — попробуйте ещё раз');
+    let words: SongWord[] = [];
+    try { words = JSON.parse(readFileSync(this.d.store.file(id, 'words.json'), 'utf8')).words ?? []; } catch { /* старая песня */ }
+    const res = await this.fixWithModel(sections, words, song.language, song.duration, song.bpm, signal);
+    if (!res.ok) throw new Error('Модель вернула текст в неожиданном виде — попробуйте ещё раз');
     return this.d.store.update(id, { sections: res.sections, lyrics: sectionsToLyrics(res.sections) });
   }
 

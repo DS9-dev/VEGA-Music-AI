@@ -28,36 +28,85 @@ function cleanWord(w: string): string {
   return w.replace(/[♪♫*«»"“”„]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-/** Слова → строки по паузам и длине (строка песни ≈ 2 такта). */
+/** Союзы, которыми строка не заканчивается: они начинают следующую фразу. */
+const LEADING_WORDS = new Set(['because', 'cause', 'and', 'but', 'so', 'or', 'that', 'if', 'when', 'и', 'а', 'но', 'что', 'чтобы', 'ведь', 'когда', 'если', 'где']);
+const bare = (w: string) => w.toLowerCase().replace(/ё/g, 'е').replace(/[^\p{L}\p{N}]+/gu, '');
+
+/** Слова, перед которыми в песне почти всегда начинается новая строка. */
+const CLAUSE_STARTS = new Set(['because', 'cause', 'потому', 'ведь']);
+
+type W = SongWord;
+
+/** Лучшее место разреза слишком длинной строки: самая длинная пауза, бонус за знак препинания. */
+function bestSplit(cur: W[], next: W): number {
+  if (cur.length < 3) return cur.length;
+  let best = cur.length;
+  let bestScore = -1;
+  for (let i = Math.max(2, Math.floor(cur.length * 0.35)); i <= cur.length; i++) {
+    const after = i === cur.length ? next : cur[i];
+    let score = after.s - cur[i - 1].e;
+    if (/[.!?…]$/.test(cur[i - 1].w)) score += 0.4;
+    else if (/[,;:]$/.test(cur[i - 1].w)) score += 0.25;
+    if (LEADING_WORDS.has(bare(cur[i - 1].w))) score -= 0.3;
+    if (score > bestScore) { bestScore = score; best = i; }
+  }
+  return best;
+}
+
+/**
+ * Слова → строки. Разрез по паузам, по концу предложения (Whisper ставит точки), по запятой у длинной строки;
+ * слишком длинная строка режется в лучшем месте, висящий союз переносится в начало следующей строки.
+ */
 export function buildLines(words: SongWord[], bpm: number | null): SongLine[] {
   const bar = barOf(bpm);
   const gapLine = clamp(0.3 * bar, 0.35, 0.9);
   const maxDur = clamp(2.4 * bar, 4, 8);
-  const lines: SongLine[] = [];
-  let cur: { words: string[]; start: number; end: number } | null = null;
-  const flush = () => {
-    if (!cur) return;
-    let text = cur.words.join(' ').replace(/\s+([,.!?…:;])/g, '$1').replace(/[,.;:…]+$/g, '').trim();
-    if (text) {
-      text = text[0].toLocaleUpperCase() + text.slice(1);
-      lines.push({ text, start: round2(cur.start), end: round2(cur.end) });
+  const maxWords = 12;
+  const ws = words.map((w) => ({ ...w, w: cleanWord(w.w) })).filter((w) => w.w && Number.isFinite(w.s)).sort((a, b) => a.s - b.s);
+  const groups: W[][] = [];
+  let cur: W[] = [];
+  const dur = (a: W[]) => (a.length ? a[a.length - 1].e - a[0].s : 0);
+  for (const w of ws) {
+    if (cur.length) {
+      const prev = cur[cur.length - 1];
+      const gap = w.s - prev.e;
+      const sentence = /[.!?…]$/.test(prev.w) && cur.length >= 3;
+      const comma = /[,;:]$/.test(prev.w) && dur(cur) > 0.6 * maxDur && cur.length >= 4;
+      const clause = cur.length >= 4 && CLAUSE_STARTS.has(bare(w.w)) && !LEADING_WORDS.has(bare(prev.w));
+      if (gap > gapLine || sentence || comma || clause) { groups.push(cur); cur = []; }
+      else if (w.e - cur[0].s > maxDur || cur.length >= maxWords) {
+        const k = bestSplit(cur, w);
+        groups.push(cur.slice(0, k));
+        cur = cur.slice(k);
+      }
     }
-    cur = null;
-  };
-  const sorted = words.map((w) => ({ ...w, w: cleanWord(w.w) })).filter((w) => w.w && Number.isFinite(w.s)).sort((a, b) => a.s - b.s);
-  for (const w of sorted) {
-    if (cur) {
-      const gap = w.s - cur.end;
-      const dur = cur.end - cur.start;
-      const prev = cur.words[cur.words.length - 1] ?? '';
-      if (gap > gapLine || (dur > maxDur && gap > 0.12) || cur.words.length >= 14 || (/[.!?]$/.test(prev) && dur > 0.6 * maxDur && gap > 0.08)) flush();
-    }
-    if (!cur) cur = { words: [], start: w.s, end: w.e };
-    cur.words.push(w.w);
-    cur.end = Math.max(cur.end, w.e);
+    cur.push(w);
   }
-  flush();
-  return lines.filter((l) => !isHallucination(l.text));
+  if (cur.length) groups.push(cur);
+
+  // «…, because» + «we got…» → «…» + «because we got…»
+  for (let i = 0; i < groups.length - 1; i++) {
+    const g = groups[i];
+    const last = g[g.length - 1];
+    if (g.length > 2 && LEADING_WORDS.has(bare(last.w)) && !/[.!?,;:]$/.test(last.w) && groups[i + 1][0].s - last.e < 0.9) {
+      groups[i + 1].unshift(g.pop()!);
+    }
+  }
+
+  const lines: SongLine[] = [];
+  groups.forEach((g, i) => {
+    let text = g.map((w) => w.w).join(' ').replace(/\s+([,.!?…:;])/g, '$1').replace(/[,.;:…]+$/g, '')
+      .replace(/([.!?…])\s+(\p{Lu}[\p{L}']*)/gu, (_m, p: string, word: string) => `${p === '.' ? ',' : p} ${/^I('|$)/.test(word) ? word : word[0].toLocaleLowerCase() + word.slice(1)}`).trim();
+    if (!text) return;
+    text = text[0].toLocaleUpperCase() + text.slice(1);
+    // одиночное «bye»/«спасибо» на тишине в конце — галлюцинация Whisper
+    const before = i > 0 ? g[0].s - groups[i - 1][groups[i - 1].length - 1].e : 99;
+    const after = i < groups.length - 1 ? groups[i + 1][0].s - g[g.length - 1].e : 99;
+    if (g.length <= 2 && before > 4 && after > 4 && /^(bye|bye-bye|thank you|thanks|пока|спасибо)[.!]*$/i.test(text)) return;
+    if (isHallucination(text)) return;
+    lines.push({ text, start: round2(g[0].s), end: round2(g[g.length - 1].e) });
+  });
+  return lines;
 }
 
 const round2 = (x: number) => Math.round(x * 100) / 100;
@@ -180,18 +229,27 @@ export function buildSections(lines: SongLine[], duration: number, bpm: number |
     else tagOf[i] = `Verse ${++verse}`;
   });
 
+  const vocal: SongSection[] = blocks.map((b, i) => ({ tag: tagOf[i], kind: 'vocal', start: round2(b[0].start), end: round2(b[b.length - 1].end), lines: b, group: groupOf[i] }));
+  return withInstrumental(vocal, duration, bpm);
+}
+
+/** Вставляет интро, проигрыши и аутро по тишине между вокальными секциями. */
+export function withInstrumental(vocal: SongSection[], duration: number, bpm: number | null): SongSection[] {
+  const bar = barOf(bpm);
   const out: SongSection[] = [];
   const instGap = Math.max(8, 4 * bar);
-  blocks.forEach((b, i) => {
-    const start = b[0].start;
-    const prevEnd = i === 0 ? 0 : blocks[i - 1][blocks[i - 1].length - 1].end;
-    if (i === 0 && start > Math.max(4, 2 * bar)) out.push({ tag: 'Intro', kind: 'instrumental', start: 0, end: round2(start), lines: [] });
-    else if (i > 0 && start - prevEnd > instGap) out.push({ tag: 'Instrumental', kind: 'instrumental', start: round2(prevEnd), end: round2(start), lines: [] });
-    out.push({ tag: tagOf[i], kind: 'vocal', start: round2(start), end: round2(b[b.length - 1].end), lines: b, group: groupOf[i] });
+  vocal.forEach((v, i) => {
+    const prevEnd = i === 0 ? 0 : vocal[i - 1].end;
+    if (i === 0 && v.start > Math.max(4, 2 * bar)) out.push({ tag: 'Intro', kind: 'instrumental', start: 0, end: round2(v.start), lines: [] });
+    else if (i > 0 && v.start - prevEnd > instGap) out.push({ tag: 'Instrumental', kind: 'instrumental', start: round2(prevEnd), end: round2(v.start), lines: [] });
+    out.push(v);
   });
-  const lastEnd = blocks.length ? blocks[blocks.length - 1][blocks[blocks.length - 1].length - 1].end : 0;
-  if (blocks.length && duration - lastEnd > Math.max(5, 2 * bar)) out.push({ tag: 'Outro', kind: 'instrumental', start: round2(lastEnd), end: round2(duration), lines: [] });
-  if (!blocks.length) out.push({ tag: 'Instrumental', kind: 'instrumental', start: 0, end: round2(duration), lines: [] });
+  const last = vocal[vocal.length - 1];
+  if (last && duration - last.end > Math.max(5, 2 * bar)) {
+    const vocalOutro = normalizeTag(last.tag).base === 'Outro';
+    out.push({ tag: vocalOutro ? 'Fade Out' : 'Outro', kind: 'instrumental', start: round2(last.end), end: round2(duration), lines: [] });
+  }
+  if (!vocal.length) out.push({ tag: 'Instrumental', kind: 'instrumental', start: 0, end: round2(duration), lines: [] });
   return out;
 }
 
@@ -295,6 +353,129 @@ export function relabel(sections: SongSection[]): SongSection[] {
     if (base === 'Chorus' || base === 'Pre-Chorus' || base === 'Post-Chorus') return { ...s, tag: base, group: base };
     return { ...s, tag: base, group: undefined };
   });
+}
+
+// ───────────────────────── перестройка текста моделью ─────────────────────────
+
+/** Модель заново делит распознанный текст на строки и секции; время строк восстанавливается по словам Whisper. */
+export function restructureMessages(sections: SongSection[], language: string) {
+  const voc = vocalSections(sections);
+  const lang = langDef(language).en;
+  const blocks = voc.map((s) => `--- ${fmtTime(s.start)}–${fmtTime(s.end)} ---\n${s.lines.map((l) => l.text).join('\n')}`).join('\n');
+  const system = [
+    'You restore song lyrics from automatic speech recognition of an isolated vocal track.',
+    `The song is in ${lang}. The words come in the correct ORDER, but line breaks and section breaks are unreliable and some words are misheard.`,
+    'Time marks (--- 0:12–0:35 ---) show where the singer paused; a long pause usually starts a new section.',
+    '',
+    'TASKS:',
+    '1. Split the text into proper song lines — one sung phrase per line, the way lyrics are printed (usually 4–12 words). Never break a phrase in the middle, never glue two phrases into one line.',
+    '2. Fix obvious recognition errors (misheard words, broken words, wrong word boundaries) using rhyme, meaning and context. Keep the words in the same order.',
+    '3. Do NOT invent lines, do NOT drop sung lines, do NOT rewrite, improve or censor the lyrics. Pure vocalizations (oh, uh-huh, yeah) may be left out.',
+    '4. Group the lines into sections and label every section with one tag: [Verse], [Pre-Chorus], [Chorus], [Post-Chorus], [Bridge], [Interlude] (spoken parts), [Outro]. The repeated hook is [Chorus] — label every repetition of it.',
+    '',
+    'OUTPUT FORMAT (strict, nothing else, no time marks, no comments):',
+    '[Verse]',
+    'line',
+    'line',
+    '',
+    '[Chorus]',
+    'line',
+  ].join('\n');
+  return [
+    { role: 'system', content: system },
+    { role: 'user', content: `${blocks}\n\nReturn the whole song. /no_think` },
+  ];
+}
+
+const RESTRUCTURE_TAGS: Record<string, string> = {
+  Verse: 'Verse', 'Pre-Chorus': 'Pre-Chorus', Chorus: 'Chorus', 'Post-Chorus': 'Post-Chorus', Bridge: 'Bridge',
+  Interlude: 'Interlude', Outro: 'Outro', Intro: 'Intro', Breakdown: 'Bridge', Build: 'Pre-Chorus', Instrumental: '', 'Guitar Solo': '', 'Piano Interlude': '',
+};
+
+function tok(w: string): string { return bare(w).replace(/['’]/g, ''); }
+
+function tokenMatch(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const short = a.length < b.length ? a : b, long = a.length < b.length ? b : a;
+  if (short.length >= 3 && long.startsWith(short) && long.length - short.length <= 2) return true; // goin / going
+  return short.length >= 4 && lineSimilarity(a, b) >= 0.75;
+}
+
+/** Выравнивание двух последовательностей слов (как LCS) — пары индексов совпавших слов. */
+export function alignTokens(a: string[], b: string[]): [number, number][] {
+  const n = a.length, m = b.length;
+  const dp = new Uint16Array((n + 1) * (m + 1));
+  const at = (i: number, j: number) => i * (m + 1) + j;
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[at(i, j)] = tokenMatch(a[i], b[j]) ? dp[at(i + 1, j + 1)] + 1 : Math.max(dp[at(i + 1, j)], dp[at(i, j + 1)]);
+    }
+  }
+  const pairs: [number, number][] = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (tokenMatch(a[i], b[j]) && dp[at(i, j)] === dp[at(i + 1, j + 1)] + 1) { pairs.push([i, j]); i++; j++; }
+    else if (dp[at(i + 1, j)] >= dp[at(i, j + 1)]) i++;
+    else j++;
+  }
+  return pairs;
+}
+
+/**
+ * Применяет ответ модели: новые строки и секции, время — по совпавшим словам Whisper.
+ * null — ответ слишком далёк от распознанного (тогда остаётся прежняя разметка).
+ */
+export function applyRestructure(words: SongWord[], raw: string, duration: number, bpm: number | null): SongSection[] | null {
+  const text = stripThink(raw);
+  const blocks: { tag: string; lines: string[] }[] = [];
+  let cur: { tag: string; lines: string[] } | null = null;
+  for (const rawLine of text.split('\n')) {
+    const line = rawLine.trim().replace(/^\*\*(.*)\*\*$/, '$1');
+    if (!line || /^---.*---$/.test(line)) continue;
+    const h = line.match(/^(?:#\s*\d+\s*)?\[([^\]]+)\]\s*$/);
+    if (h) {
+      const info = normalizeTag(h[1].replace(/:.*$/, ''));
+      const base = info.kind === 'section' ? RESTRUCTURE_TAGS[info.base] ?? 'Verse' : 'Verse';
+      cur = base ? { tag: base, lines: [] } : null;
+      if (cur) blocks.push(cur);
+      continue;
+    }
+    if (!cur) { cur = { tag: 'Verse', lines: [] }; blocks.push(cur); }
+    const clean = line.replace(/^[-•]\s+/, '').replace(/\s*\[[^\]]*\]\s*/g, ' ').trim();
+    if (clean) cur.lines.push(clean);
+  }
+  const outLines = blocks.flatMap((b, bi) => b.lines.map((l) => ({ bi, text: l, toks: l.split(/\s+/).map(tok).filter(Boolean) })));
+  const outToks: { li: number; t: string }[] = outLines.flatMap((l, li) => l.toks.map((t) => ({ li, t })));
+  const recWords = words.filter((w) => tok(w.w));
+  const recToks = recWords.map((w) => tok(w.w));
+  if (!outToks.length || !recToks.length) return null;
+  const pairs = alignTokens(outToks.map((x) => x.t), recToks);
+  if (pairs.length / outToks.length < 0.55 || pairs.length / recToks.length < 0.45) return null;
+
+  const first = new Map<number, number>(), last = new Map<number, number>();
+  for (const [oi, ri] of pairs) {
+    const li = outToks[oi].li;
+    if (!first.has(li)) first.set(li, ri);
+    last.set(li, ri);
+  }
+  const timed: { bi: number; line: SongLine }[] = outLines.map((l, li) => ({
+    bi: l.bi,
+    line: { text: l.text, start: first.has(li) ? round2(recWords[first.get(li)!].s) : NaN, end: last.has(li) ? round2(recWords[last.get(li)!].e) : NaN },
+  }));
+  // строки без совпавших слов — между соседями
+  timed.forEach((t, i) => {
+    if (Number.isFinite(t.line.start)) return;
+    const prev = timed.slice(0, i).reverse().find((x) => Number.isFinite(x.line.end));
+    const next = timed.slice(i + 1).find((x) => Number.isFinite(x.line.start));
+    t.line.start = prev ? prev.line.end : next ? Math.max(0, next.line.start - 2) : 0;
+    t.line.end = next ? Math.max(t.line.start, next.line.start) : t.line.start + 2;
+  });
+  const vocal: SongSection[] = blocks.map((b, bi) => {
+    const ls = timed.filter((t) => t.bi === bi).map((t) => t.line);
+    return { tag: b.tag, kind: 'vocal' as const, start: ls[0]?.start ?? 0, end: ls[ls.length - 1]?.end ?? 0, lines: ls };
+  }).filter((s) => s.lines.length);
+  return withInstrumental(relabel(vocal), duration, bpm);
 }
 
 // ───────────────────────── бюджет слогов ─────────────────────────

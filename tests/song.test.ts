@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import {
-  applyCleanup, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
+  applyCleanup, applyRestructure, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
   sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
 } from '../src/shared/song';
 import type { Song, SongWord } from '../src/shared/types';
@@ -169,4 +169,49 @@ test('куплет без паузы переходит в припев — бл
   assert.deepEqual(voc.map((s) => s.tag), ['Verse 1', 'Chorus', 'Verse 2', 'Chorus', 'Chorus']);
   assert.equal(voc[0].lines.length, 4);
   assert.equal(voc[1].lines[0].text, CH[0]);
+});
+
+/** Слова подряд без пауз (быстрый рок): 0.3 с на слово, пауза только между блоками. */
+function continuous(text: string, at: number): SongWord[] {
+  return text.split(' ').map((w, i) => ({ w, s: at + i * 0.3, e: at + i * 0.3 + 0.28 }));
+}
+
+test('нарезка без пауз: по точкам Whisper, лучшее место разреза, союз переносится в следующую строку', () => {
+  const words = continuous('Is anyone awake tonight in this electric town? Turn the radio up and let the windows down. We keep the engine running because we got the night to burn', 2);
+  const lines = buildLines(words, 120).map((l) => l.text);
+  assert.deepEqual(lines, [
+    'Is anyone awake tonight in this electric town?',
+    'Turn the radio up and let the windows down',
+    'We keep the engine running',
+    'Because we got the night to burn',
+  ]);
+});
+
+test('одиночное «Bye» на тишине в конце — галлюцинация', () => {
+  const words = [...continuous('We ride until the morning light', 1), { w: 'Bye.', s: 30, e: 30.4 }];
+  assert.deepEqual(buildLines(words, 120).map((l) => l.text), ['We ride until the morning light']);
+});
+
+test('перестройка моделью: новые строки и секции, время — по словам Whisper', () => {
+  const words = [
+    ...continuous('We ride until the morning light the city never sleeps tonight. Hey hey', 10),
+    ...continuous('Burn it up burn it down we are the loudest in the town', 30),
+    ...continuous('Burn it up burn it down we are the loudest in the town', 60),
+  ];
+  const raw = [
+    '[Verse]', 'We ride until the morning light', 'The city never sleeps tonight',
+    '[Chorus]', 'Burn it up, burn it down', "We're the loudest in the town",
+    '[Chorus]', 'Burn it up, burn it down', "We're the loudest in the town",
+  ].join('\n');
+  const s = applyRestructure(words, raw, 80, 120)!;
+  assert.ok(s);
+  const voc = s.filter((x) => x.kind === 'vocal');
+  assert.deepEqual(voc.map((x) => x.tag), ['Verse 1', 'Chorus', 'Chorus']);
+  assert.equal(voc[0].lines[1].text, 'The city never sleeps tonight');
+  assert.ok(Math.abs(voc[0].lines[1].start - (10 + 6 * 0.3)) < 0.01, `start=${voc[0].lines[1].start}`);
+  assert.ok(Math.abs(voc[2].start - 60) < 0.01);
+  assert.equal(voc[1].group, voc[2].group);
+  assert.deepEqual(s.map((x) => x.tag), ['Intro', 'Verse 1', 'Instrumental', 'Chorus', 'Instrumental', 'Chorus', 'Outro']);
+  // ответ «не про эту песню» — не принимается
+  assert.equal(applyRestructure(words, '[Verse]\nСовсем другой текст\nНичего общего', 80, 120), null);
 });
