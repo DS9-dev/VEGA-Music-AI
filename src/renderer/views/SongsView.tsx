@@ -8,7 +8,7 @@ import { ImportDialog, RemakeDialog } from '../components/SongDialogs';
 import { Cover, Segmented, ToggleRow, useToast } from '../components/ui';
 import { NewVoiceDialog } from '../components/VoiceDialogs';
 import {
-  IcAlert, IcArrowRight, IcDisc, IcFolder, IcMic, IcPause, IcPlay, IcPlus, IcRefresh, IcSkull, IcSparkles, IcStop, IcTrash, IcWand, IcWave,
+  IcAlert, IcArrowRight, IcDisc, IcFemale, IcFolder, IcMale, IcMic, IcPause, IcPlay, IcPlus, IcRefresh, IcRepeat, IcSkull, IcSparkles, IcStop, IcTrash, IcWand, IcWave,
 } from '../icons';
 import { SECTION_RU } from '../sections';
 
@@ -38,7 +38,7 @@ export function SongsView(props: {
   voices: VoiceItem[];
   onJobStarted: () => void;
   onVoiceStarted: () => void;
-  onUseText: (song: SongItem, text: string, title: string) => void;
+  onUseText: (song: SongItem, text: string, title: string, language: string) => void;
 }) {
   const toast = useToast();
   const [sel, setSel] = useState<string | null>(props.focusId);
@@ -117,7 +117,7 @@ function SongDetail(props: {
   voices: VoiceItem[];
   onJobStarted: () => void;
   onVoiceStarted: () => void;
-  onUseText: (song: SongItem, text: string, title: string) => void;
+  onUseText: (song: SongItem, text: string, title: string, language: string) => void;
   toast: ReturnType<typeof useToast>;
 }) {
   const { song, toast } = props;
@@ -127,6 +127,7 @@ function SongDetail(props: {
   const [newTitle, setNewTitle] = useState(song.rewrite?.title ?? '');
   const [theme, setTheme] = useState(song.rewrite?.theme ?? '');
   const [mature, setMature] = useState(!!song.rewrite?.matureDark);
+  const [rwLang, setRwLang] = useState(song.rewrite?.language ?? song.language);
   const [streaming, setStreaming] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [showTheme, setShowTheme] = useState(!song.rewrite);
@@ -165,6 +166,8 @@ function SongDetail(props: {
   useEffect(() => window.api.songs.onChunk((c) => { setNewText(c.text.replace(/^TITLE:.*\n?/i, '')); setThinking(c.thinking); }), []);
 
   const params = useMemo(() => ({ ...songTrackParams(song, DEFAULT_PARAMS), duration: Math.max(30, Math.round(song.duration)) }), [song]);
+  const newLang = streaming ? rwLang : song.rewrite?.language ?? rwLang;
+  const newParams = useMemo(() => ({ ...params, language: newLang }), [params, newLang]);
   const budgets = useMemo(() => measureBudgets(sectionBudgets(song.sections, text), newText), [song.sections, text, newText]);
 
   const play = async (w: Which) => {
@@ -186,7 +189,7 @@ function SongDetail(props: {
     const prev = { newText, newTitle };
     setStreaming(true); setThinking(true); setTab('new'); setNewText('');
     try {
-      const r = await window.api.songs.rewrite(song.id, { theme, matureDark: mature, text });
+      const r = await window.api.songs.rewrite(song.id, { theme, matureDark: mature, text, language: rwLang });
       setNewText(r.text); setNewTitle(r.title); setShowTheme(false);
       r.warnings.forEach((w) => toast('err', w));
       if (!r.warnings.length) toast('ok', 'Новый текст готов — слоги совпадают с оригиналом');
@@ -216,6 +219,13 @@ function SongDetail(props: {
   const useNew = tab === 'new' && newText.trim().length > 0;
   const actText = useNew ? newText : text;
   const actTitle = useNew ? newTitle || `${song.title} (новый текст)` : song.title;
+  const actLang = useNew ? newLang : song.language;
+  const toggleGender = async () => {
+    const g = song.gender === 'female' ? 'male' : 'female';
+    await window.api.songs.update(song.id, { gender: g });
+    props.refresh();
+    toast('ok', g === 'male' ? 'Голос исполнителя: мужской' : 'Голос исполнителя: женский');
+  };
   const lang = LANGUAGES.find((l) => l.code === song.language)?.label ?? song.language;
 
   if (song.status === 'analyzing') {
@@ -254,7 +264,9 @@ function SongDetail(props: {
             <span>{fmtTime(song.duration)}</span>
             {song.bpm && <span>{song.bpm} BPM</span>}
             {song.key && <span>{song.key}</span>}
-            {song.gender && <span>{song.gender === 'female' ? 'Женский голос' : 'Мужской голос'}{song.note ? ` · ${song.note}` : ''}</span>}
+            <button className="meta-btn" onClick={toggleGender} title="Определено по высоте голоса. Нажмите, если неверно — от этого зависит, каким голосом ACE-Step споёт новые слова">
+              {song.gender === 'female' ? <IcFemale size={12} /> : <IcMale size={12} />}{song.gender === 'female' ? 'Женский голос' : song.gender === 'male' ? 'Мужской голос' : 'Голос не определён'}{song.note ? ` · ${song.note}` : ''}<IcRepeat size={11} />
+            </button>
             {lang && <span>{lang}</span>}
           </div>
           <div className="song-play">
@@ -300,14 +312,17 @@ function SongDetail(props: {
               <textarea className="textarea" rows={2} value={theme} onChange={(e) => setTheme(e.target.value)} disabled={streaming}
                 placeholder="О чём будет новый текст? Например: космонавт возвращается домой после долгой экспедиции" />
               <div className="row" style={{ marginTop: 10 }}>
+                <select className="select lang-select" value={rwLang} onChange={(e) => setRwLang(e.target.value)} disabled={streaming} title="Язык нового текста">
+                  {LANGUAGES.map((l) => <option key={l.code} value={l.code}>{l.label}{l.code === song.language ? ' · как в песне' : ''}</option>)}
+                </select>
                 <ToggleRow className="dark compact" on={mature} onChange={setMature} title={<><IcSkull size={14} /> Mature Dark</>} />
                 <span style={{ flex: 1 }} />
                 <button className={`btn ${streaming ? '' : 'primary'}`} onClick={rewrite} disabled={props.status.lm === 'offline' && !streaming}
                   title={props.status.lm === 'offline' ? 'LM Studio не запущен' : ''}>
-                  {streaming ? <><IcStop size={14} /> Остановить</> : <><IcSparkles size={16} /> {song.rewrite ? 'Переписать заново' : 'Переписать на эту тему'}</>}
+                  {streaming ? <><IcStop size={14} /> Остановить</> : <><IcSparkles size={16} /> {song.rewrite ? 'Переписать заново' : 'Переписать'}</>}
                 </button>
               </div>
-              <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>Структура сохранится: те же секции и припевы, в каждой секции — столько же слогов, сколько в оригинале. Число строк может отличаться.</div>
+              <div className="dim" style={{ fontSize: 12, marginTop: 8 }}>Структура сохранится: те же секции и припевы, в каждой секции — столько же слогов, сколько в оригинале. Число строк может отличаться.{rwLang !== song.language ? ' Текст будет на другом языке — слоги считаются по нему.' : ''}</div>
             </div>
           )}
 
@@ -318,7 +333,7 @@ function SongDetail(props: {
           {tab === 'orig'
             ? <LyricsEditor text={text} onChange={setText} params={params} streaming={false} thinking={false} />
             : newText || streaming
-              ? <LyricsEditor text={newText} onChange={setNewText} params={params} streaming={streaming} thinking={thinking} />
+              ? <LyricsEditor text={newText} onChange={setNewText} params={newParams} streaming={streaming} thinking={thinking} />
               : <div className="instr-empty"><div><div className="big-ic"><IcSparkles size={30} /></div><h3 style={{ margin: '0 0 6px', color: 'var(--text)' }}>Текст на новую тему</h3><div>Задайте тему выше — модель перепишет песню, сохранив её ритм.</div></div></div>}
 
           {tab === 'new' && newText && !streaming && (
@@ -336,7 +351,7 @@ function SongDetail(props: {
             <div className="sa-ic"><IcSparkles size={18} /></div>
             <h4>Своя музыка на этот текст</h4>
             <p>Откроется «Создать» с {useNew ? 'новым текстом' : 'текстом песни'}, темпом{song.bpm ? ` ${song.bpm} BPM` : ''} и длительностью оригинала. Включите «По мотивам» — и музыка будет похожа на исходную.</p>
-            <button className="btn soft" disabled={!actText.trim() || streaming} onClick={() => props.onUseText(song, actText, actTitle)}>Перейти к созданию <IcArrowRight size={15} /></button>
+            <button className="btn soft" disabled={!actText.trim() || streaming} onClick={() => props.onUseText(song, actText, actTitle, actLang)}>Перейти к созданию <IcArrowRight size={15} /></button>
           </div>
           <div className="card song-action hot">
             <div className="sa-ic"><IcDisc size={18} /></div>

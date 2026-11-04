@@ -64,7 +64,8 @@ export async function rewriteSong(
 ): Promise<{ title: string; text: string; warnings: string[]; checks: { name: string; target: number; actual: number; level: string }[] }> {
   const parts = uniqueParts(song.sections, spec.text ?? song.lyrics);
   if (!parts.length) throw new Error('В песне нет распознанных секций с текстом');
-  const messages: { role: string; content: string }[] = rewriteMessages(song, parts, spec.theme, spec.matureDark);
+  const language = spec.language || song.language;
+  const messages: { role: string; content: string }[] = rewriteMessages(song, parts, spec.theme, spec.matureDark, language);
   const stream = (msgs: { role: string; content: string }[], prefix = '') => lm.streamChat(
     { model: s.lyricsModel, messages: msgs, temperature: s.lyricsTemperature, max_tokens: 5000 },
     (full, reasoning) => {
@@ -94,7 +95,7 @@ export async function rewriteSong(
     checks = checkRewrite(parts, parsed);
   }
   const assembled = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics);
-  const clean = sanitizeLyrics(assembled.text, { allowBacking: false, lang: song.language });
+  const clean = sanitizeLyrics(assembled.text, { allowBacking: false, lang: language });
   const warnings: string[] = [];
   if (assembled.missing.length) warnings.push(`Модель не написала: ${assembled.missing.join(', ')} — там остался исходный текст`);
   const off = checks.filter((c) => c.level === 'bad' && c.actual > 0);
@@ -296,13 +297,14 @@ export class SongJobs {
     this.set({ detail: 'Проверяем ACE-Step…', progress: 0.02 });
     await this.d.ensureAce((msg, starting) => this.set({ phase: starting ? 'starting' : 'preparing', detail: msg }), signal);
 
-    const lyrics = sanitizeLyrics(spec.text, { allowBacking: false, lang: song.language }).text;
+    const language = spec.language || song.language || 'ru';
+    const lyrics = sanitizeLyrics(spec.text, { allowBacking: false, lang: language }).text;
     const gender = song.gender ?? 'male';
     const vocalTags = `${gender} vocal, single lead vocalist, clear articulate vocals`;
     const prompt = [song.caption?.trim(), song.genres?.length && !song.caption ? song.genres.join(', ') : '', vocalTags].filter(Boolean).join(', ');
     const span = vocalSpan(song);
     const base: Record<string, unknown> = {
-      prompt, lyrics, audio_format: s.audioFormat, vocal_language: song.language || 'ru', batch_size: spec.variants,
+      prompt, lyrics, audio_format: s.audioFormat, vocal_language: language, batch_size: spec.variants,
       audio_duration: song.duration, use_cot_caption: false, use_cot_language: false, lm_backend: 'pt',
       lm_model_path: s.aceLmModel, lm_temperature: s.aceLmTemperature, use_random_seed: true, time_signature: '4',
     };
@@ -369,7 +371,7 @@ export class SongJobs {
     const vdir = voice ? this.d.voices.dir(voice.id) : '';
     const made: Track['variants'] = [];
     const params = {
-      ...songTrackParams(song, DEFAULT_PARAMS), genres: song.genres?.length ? song.genres : ['Из песни'],
+      ...songTrackParams(song, DEFAULT_PARAMS), language, genres: song.genres?.length ? song.genres : ['Из песни'],
       theme: song.rewrite?.theme ?? '', voiceId: spec.voiceId, voiceShift: spec.voiceShift, variants: spec.variants,
     };
     const track: Track = {

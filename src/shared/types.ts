@@ -214,7 +214,7 @@ export interface Song {
   recognized?: string; // как распознал Whisper, до исправлений
   caption?: string; // описание стиля (ACE-Step)
   genres?: string[];
-  rewrite?: { theme: string; title: string; text: string; matureDark?: boolean; createdAt: string };
+  rewrite?: { theme: string; title: string; text: string; matureDark?: boolean; language?: string; createdAt: string };
   warnings: string[];
   error?: string;
 }
@@ -223,7 +223,7 @@ export type SongItem = Song & { paths: { source: string; vocals?: string; instru
 
 export interface SongImportSpec { path: string; language: string | null; cleanup: boolean }
 
-export interface RewriteSpec { theme: string; matureDark: boolean; text?: string }
+export interface RewriteSpec { theme: string; matureDark: boolean; text?: string; language?: string }
 
 export interface RewriteResult {
   title: string;
@@ -243,6 +243,7 @@ export interface RemakeSpec {
   voiceShift: number | null;
   variants: 1 | 2;
   keepAce: boolean; // сохранять исходный вокал ACE-Step рядом
+  language?: string; // язык текста (по умолчанию — язык песни)
 }
 
 export interface SectionBudget { tag: string; group?: string; start: number; end: number; target: number; original: number; actual?: number }

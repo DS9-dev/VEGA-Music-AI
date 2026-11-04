@@ -1,6 +1,6 @@
 import type {
   BackendStatus, JobState, LmModelInfo, LyricsChunk, LyricsResult, NewVoiceSpec, RemakeSpec, RewriteResult, RewriteSpec, Settings, SongImportSpec, SongItem,
-  Track, TrackParams, VoiceCheck, VoiceItem, VoiceTrainProfile,
+  Track, TrackParams, VoiceCheck, VoiceGender, VoiceItem, VoiceTrainProfile,
 } from './types';
 
 /** API, которое preload выставляет в window.api. */
@@ -54,7 +54,7 @@ export interface MusicApi {
     list(): Promise<SongItem[]>;
     pick(): Promise<string | null>;
     importSong(spec: SongImportSpec): Promise<string>;
-    update(id: string, patch: { title?: string; lyrics?: string; rewrite?: SongItem['rewrite'] | null }): Promise<SongItem>;
+    update(id: string, patch: { title?: string; lyrics?: string; rewrite?: SongItem['rewrite'] | null; gender?: VoiceGender }): Promise<SongItem>;
     remove(id: string): Promise<void>;
     reveal(id: string): Promise<void>;
     readAudio(id: string, which: 'source' | 'vocals' | 'instrumental'): Promise<ArrayBuffer>;

@@ -268,7 +268,7 @@ export function installDemoApi() {
           songChunkSubs.forEach((f) => f({ text: full.slice(0, i), thinking: false }));
           await sleep(22 / speed);
         }
-        x.rewrite = { theme: spec.theme, title: 'Земля родная', text: full, matureDark: spec.matureDark, createdAt: new Date().toISOString() };
+        x.rewrite = { theme: spec.theme, title: 'Земля родная', text: full, matureDark: spec.matureDark, language: spec.language, createdAt: new Date().toISOString() };
         return { title: 'Земля родная', text: full, warnings: [], checks: [] };
       },
       cancelRewrite: async () => { cancelled = true; },

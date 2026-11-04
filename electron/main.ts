@@ -268,6 +268,7 @@ ipcMain.handle('songs:update', (_e, id: string, patch: Partial<Song>) => {
   if (typeof patch.title === 'string') allowed.title = patch.title.trim() || songs.get(id).title;
   if (typeof patch.lyrics === 'string') allowed.lyrics = patch.lyrics;
   if ('rewrite' in patch) allowed.rewrite = patch.rewrite ?? undefined;
+  if (patch.gender === 'male' || patch.gender === 'female') allowed.gender = patch.gender;
   return songItem(songs.update(id, allowed));
 });
 ipcMain.handle('songs:remove', async (_e, id: string) => { await shell.trashItem(songs.dir(id)); });
@@ -284,7 +285,7 @@ ipcMain.handle('songs:rewrite', async (e, id: string, spec: RewriteSpec) => {
   try {
     const song = songs.get(id);
     const r = await rewriteSong(lm, settings.get(), song, spec, (c) => e.sender.send('songs:chunk', c), rewriteAbort.signal);
-    songs.update(id, { rewrite: { theme: spec.theme, title: r.title, text: r.text, matureDark: spec.matureDark, createdAt: new Date().toISOString() } });
+    songs.update(id, { rewrite: { theme: spec.theme, title: r.title, text: r.text, matureDark: spec.matureDark, language: spec.language || song.language, createdAt: new Date().toISOString() } });
     if (settings.get().unloadLyricsModel) void lm.unload(settings.get().lyricsModel).catch(() => false);
     return r;
   } finally { rewriteAbort = null; }

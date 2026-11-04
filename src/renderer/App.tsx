@@ -102,8 +102,8 @@ export function App() {
     toast('ok', `Трек будет спет голосом «${v.name}»`);
   };
 
-  const useSongText = (song: SongItem, text: string, title: string) => {
-    setParams(songTrackParams(song, params));
+  const useSongText = (song: SongItem, text: string, title: string, language: string) => {
+    setParams({ ...songTrackParams(song, params), language });
     setDraft({ title, text });
     setView('create');
     toast('ok', 'Текст, темп и длительность песни загружены');

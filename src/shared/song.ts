@@ -539,8 +539,9 @@ export function uniqueParts(sections: SongSection[], text?: string): UniquePart[
   return parts;
 }
 
-export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, parts: UniquePart[], theme: string, matureDark: boolean) {
-  const lang = langDef(song.language);
+export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, parts: UniquePart[], theme: string, matureDark: boolean, language?: string) {
+  const lang = langDef(language || song.language);
+  const translated = !!language && language !== song.language;
   const system = [
     'You are an award-winning professional songwriter. You rewrite existing songs on a NEW topic so that the new lyrics can be sung over the ORIGINAL music.',
     `Write ALL sung lines in ${lang.en} only.${lang.code === 'ru' ? ' Use natural, modern, idiomatic Russian with correct word stress that falls naturally on strong beats.' : ''}`,
@@ -548,6 +549,7 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     'KEEP THE MUSICAL SKELETON:',
     '- The same sections in the same order, with exactly the section headers given below.',
     '- Each section must have about the TARGET number of syllables (±10%). This is the most important rule: it makes the words fit the beat. Count syllables carefully.',
+    ...(translated ? [`- The original is in ${langDef(song.language).en}, but the NEW lyrics must be written in ${lang.en}. Count syllables of the ${lang.en} words.`] : []),
     '- The number of lines may differ from the original, but similar line lengths and a similar rhyme scheme work best.',
     '- A section that is sung several times (the chorus) is written ONCE; it will be repeated automatically.',
     '- The chorus is catchy and contains the main hook of the new topic.',
@@ -671,7 +673,11 @@ export function vocalSpan(song: Pick<Song, 'sections' | 'duration'>): { start: n
   return { start: Math.max(0, round2(voc[0].start - 0.4)), end: Math.min(song.duration, round2(voc[voc.length - 1].end + 0.8)) };
 }
 
+/**
+ * Пол по средней высоте голоса. В пении мужские голоса высоко: рок-тенор держится около C4–D4 (260–300 Гц),
+ * поэтому порог выше, чем для речи; ошибку можно поправить в карточке песни.
+ */
 export function guessGender(f0: number | null | undefined): 'male' | 'female' | null {
   if (!f0) return null;
-  return f0 < 205 ? 'male' : 'female';
+  return f0 < 285 ? 'male' : 'female';
 }

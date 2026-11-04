@@ -97,10 +97,12 @@ export function RemakeDialog(props: {
   const [busy, setBusy] = useState(false);
 
   const text = source === 'new' && hasNew ? song.rewrite!.text : song.lyrics;
+  const language = source === 'new' && hasNew ? song.rewrite!.language ?? song.language : song.language;
+  const langLabel = LANGUAGES.find((l) => l.code === language)?.label ?? language;
   const start = async () => {
     setBusy(true);
     try {
-      await window.api.songs.remake({ songId: song.id, text, title, method, voiceId: voiceId || null, voiceShift: shift, variants, keepAce });
+      await window.api.songs.remake({ songId: song.id, text, title, method, voiceId: voiceId || null, voiceShift: shift, variants, keepAce, language });
       props.onStarted();
     } catch (e) { toast('err', errText(e)); setBusy(false); }
   };
@@ -123,6 +125,7 @@ export function RemakeDialog(props: {
           ]} />
         </div>
       </div>
+      <div className="dim" style={{ fontSize: 12.5, marginTop: 8 }}>Язык пения: <b>{langLabel}</b> · голос ACE-Step: {song.gender === 'female' ? 'женский' : 'мужской'} (меняется в карточке песни)</div>
       {source === 'new' && !hasNew && <div className="plan-line" style={{ color: 'var(--warn)' }}>Новый текст ещё не написан — перепишите его на вкладке «Новый текст» или пойте текст песни.</div>}
 
       <div className="field">

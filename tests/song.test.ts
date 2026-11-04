@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import {
   applyCleanup, applyRestructure, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
-  sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
+  guessGender, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
 } from '../src/shared/song';
 import type { Song, SongWord } from '../src/shared/types';
 
@@ -214,4 +214,23 @@ test('перестройка моделью: новые строки и секц
   assert.deepEqual(s.map((x) => x.tag), ['Intro', 'Verse 1', 'Instrumental', 'Chorus', 'Instrumental', 'Chorus', 'Outro']);
   // ответ «не про эту песню» — не принимается
   assert.equal(applyRestructure(words, '[Verse]\nСовсем другой текст\nНичего общего', 80, 120), null);
+});
+
+test('пол по высоте голоса: высокий рок-тенор — мужской', () => {
+  assert.equal(guessGender(262), 'male'); // C4
+  assert.equal(guessGender(150), 'male');
+  assert.equal(guessGender(350), 'female');
+  assert.equal(guessGender(null), null);
+});
+
+test('новый текст на другом языке: модель получает язык перевода', () => {
+  const sections = buildSections(buildLines(fakeWords([{ at: 5, lines: V1 }, { at: 25, lines: CH }]), 120), 50, 120);
+  const parts = uniqueParts(sections);
+  const song = { language: 'en', title: 'T', bpm: 120, gender: 'male' as const };
+  const ru = rewriteMessages(song, parts, 'тема', false, 'ru');
+  assert.match(ru[0].content, /Write ALL sung lines in Russian only/);
+  assert.match(ru[0].content, /original is in English, but the NEW lyrics must be written in Russian/);
+  const same = rewriteMessages(song, parts, 'тема', false);
+  assert.match(same[0].content, /in English only/);
+  assert.doesNotMatch(same[0].content, /must be written in/);
 });
