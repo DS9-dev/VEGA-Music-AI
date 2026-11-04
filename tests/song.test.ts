@@ -234,3 +234,22 @@ test('новый текст на другом языке: модель полу�
   assert.match(same[0].content, /in English only/);
   assert.doesNotMatch(same[0].content, /must be written in/);
 });
+
+test('расширенный последний припев — отдельный вариант со своим бюджетом', () => {
+  const longCh = [...CH, 'Ночь моя неоновая ночь опять', 'Унеси печали прочь сейчас', 'Ночь моя неоновая ночь'];
+  const sections = buildSections(buildLines(fakeWords([
+    { at: 10, lines: V1 }, { at: 30, lines: CH }, { at: 50, lines: V2 }, { at: 70, lines: CH }, { at: 96, lines: longCh },
+  ]), 120), 140, 120);
+  const voc = sections.filter((s) => s.kind === 'vocal');
+  assert.deepEqual(voc.map((s) => s.tag), ['Verse 1', 'Chorus', 'Verse 2', 'Chorus', 'Chorus']);
+  const parts = uniqueParts(sections);
+  assert.deepEqual(parts.map((p) => p.name), ['Verse 1', 'Chorus', 'Verse 2', 'Chorus 2']);
+  const main = parts.find((p) => p.name === 'Chorus')!, variant = parts.find((p) => p.name === 'Chorus 2')!;
+  assert.equal(main.repeats, 2);
+  assert.equal(variant.variantOf, 'Chorus');
+  assert.ok(variant.target > main.target * 1.4);
+  const raw = '[Verse 1]\nа\n[Chorus]\nкороткий припев\n[Verse 2]\nб\n[Chorus 2]\nдлинный вариант припева';
+  const out = assembleRewrite(sections, parts, parseRewrite(raw, parts)).text;
+  assert.equal(out.match(/короткий припев/g)!.length, 2);
+  assert.equal(out.match(/длинный вариант припева/g)!.length, 1);
+});

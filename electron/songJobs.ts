@@ -17,7 +17,7 @@ import { runWorker, toolArgs, type WorkerConfig } from './voiceWorker';
 import { DEFAULT_PARAMS, KEYS } from '../src/shared/catalog';
 import { sanitizeLyrics } from '../src/shared/lyrics';
 import {
-  applyCleanup, applyRestructure, assembleRewrite, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, fixMessage, guessGender,
+  applyCleanup, applyRestructure, assembleRewrite, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, fixMessage, guessGender,
   parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan, type RewriteCheck,
 } from '../src/shared/song';
 import type {
@@ -94,6 +94,14 @@ export async function rewriteSong(
     }
     checks = checkRewrite(parts, parsed);
   }
+  // пропущенные секции — по одной, отдельным коротким запросом
+  for (const part of parts.filter((p) => !parsed.parts.get(p.key)?.length)) {
+    const context = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics).text;
+    const partRaw = await stream(partMessages(song, part, spec.theme, spec.matureDark, language, context), `${context}\n\n`);
+    const got = parseRewrite(partRaw.match(/\[[^\]]+\]/) ? partRaw : `[${part.name}]\n${partRaw}`, [part]).parts.get(part.key);
+    if (got?.length) parsed.parts.set(part.key, got);
+  }
+  checks = checkRewrite(parts, parsed);
   const assembled = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics);
   const clean = sanitizeLyrics(assembled.text, { allowBacking: false, lang: language });
   const warnings: string[] = [];

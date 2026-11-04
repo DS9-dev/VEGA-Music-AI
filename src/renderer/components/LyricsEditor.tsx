@@ -19,6 +19,7 @@ export function LyricsEditor(props: {
   params: TrackParams;
   streaming: boolean;
   thinking: boolean;
+  songMode?: boolean; // текст песни: длительность задана музыкой — без индикатора длины и подсказок о длине строк
 }) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const gutterRef = useRef<HTMLDivElement>(null);
@@ -84,13 +85,28 @@ export function LyricsEditor(props: {
           wrap="off"
         />
       </div>
-      {!props.streaming && <LyricsFooter analysis={analysis} onJump={jumpTo} hasText={!!props.text.trim()} />}
+      {!props.streaming && <LyricsFooter analysis={analysis} onJump={jumpTo} hasText={!!props.text.trim()} songMode={props.songMode} />}
     </>
   );
 }
 
-function LyricsFooter({ analysis, onJump, hasText }: { analysis: LyricsAnalysis; onJump: (l: number) => void; hasText: boolean }) {
+function LyricsFooter({ analysis, onJump, hasText, songMode }: { analysis: LyricsAnalysis; onJump: (l: number) => void; hasText: boolean; songMode?: boolean }) {
   if (!hasText) return null;
+  if (songMode) {
+    const ws = analysis.warnings.filter((w) => w.line >= 0 && !/слогов — длинная|Очень короткая/.test(w.message));
+    if (!ws.length) return null;
+    return (
+      <div className="lyrics-footer">
+        <div className="warn-list">
+          {ws.slice(0, 30).map((w, i) => (
+            <button key={i} className={`warn-item ${w.level}`} onClick={() => onJump(w.line)}>
+              {w.level === 'bad' ? <IcAlert size={14} /> : <IcInfo size={14} />}<span className="ln">стр {w.line + 1}</span><span>{w.message}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   const ratio = analysis.targetSec ? analysis.estimatedSec / analysis.targetSec : 0;
   const color = ratio < 0.8 ? 'var(--bad)' : ratio < 0.92 || ratio > 1.12 ? 'var(--warn)' : 'var(--ok)';
   const maxScale = Math.max(1.25, ratio + 0.05);

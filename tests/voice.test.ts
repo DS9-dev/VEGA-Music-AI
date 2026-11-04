@@ -310,6 +310,26 @@ test('переписывание на тему: бюджет слогов и о�
   assert.ok(chunks.length >= 2);
 });
 
+test('переписывание: пропущенная секция дописывается отдельным запросом', async () => {
+  const words = [
+    ...'Ночь моя неоновая ночь'.split(' ').map((w, i) => ({ w, s: 1 + i * 0.4, e: 1.3 + i * 0.4 })),
+    ...'Big Kenny talk to the people right now'.split(' ').map((w, i) => ({ w, s: 12 + i * 0.4, e: 12.3 + i * 0.4 })),
+  ];
+  const sections = buildSections(buildLines(words, 120), 30, 120).map((s) => (s.kind === 'vocal' && s.start > 10 ? { ...s, tag: 'Bridge' } : s));
+  const song = { id: 's', title: 'T', createdAt: '', status: 'ready' as const, sourceName: '', source: 'source.wav', duration: 30, bpm: 120, key: null,
+    gender: 'male' as const, language: 'en', sections, lyrics: sectionsToLyrics(sections), warnings: [] };
+  const lm = fakeLm([
+    'TITLE: Дом\n[Verse 1]\nСнова дома я',
+    '[Verse 1]\nСнова дома я',
+    'Тихий вечер над рекой опять',
+  ]);
+  const r = await rewriteSong(lm as any, defaultSettings('/tmp/x'), song, { theme: 'дом', matureDark: false, language: 'ru' }, () => {}, new AbortController().signal);
+  assert.equal(lm.calls.length, 3);
+  assert.match(lm.calls[2].at(-1)!.content, /Write ONLY the \[Bridge\] section now, in Russian/);
+  assert.match(r.text, /Тихий вечер над рекой опять/);
+  assert.ok(!r.warnings.some((w) => /не написала/.test(w)), r.warnings.join('; '));
+});
+
 test('новые слова на эту музыку: repaint и lego → новый вокал → родной минус', { skip: !hasPy && 'нет Python' }, async () => {
   const { s, store, library, worker, song, songs, root } = songSetup();
   const voiceJobs = new VoiceJobs({ store, library, settings: () => s, worker, prepareGpu: async () => {}, gpuBusy: () => false, onUpdate: () => {} });

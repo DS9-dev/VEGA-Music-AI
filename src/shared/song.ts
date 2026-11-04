@@ -520,21 +520,45 @@ export interface UniquePart {
   repeats: number;
   start: number;
   end: number;
+  variantOf?: string; // вариант припева другой длины
+}
+
+const median = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y); return a.length ? a[Math.floor((a.length - 1) / 2)] : 0; };
+
+/**
+ * Ключ уникальной части для каждой вокальной секции. Повторы одной группы (припев) делят текст,
+ * но повтор, заметно отличающийся по длине (расширенный последний припев), получает свой ключ — «вариант».
+ */
+export function partKeys(src: SongSection[]): { keys: string[]; targets: Map<string, number> } {
+  const voc = vocalSections(src);
+  const budgets = sectionBudgets(src);
+  const keys = voc.map((s, i) => s.group ?? `s${i}`);
+  const byGroup = new Map<string, number[]>();
+  voc.forEach((s, i) => { if (s.group) byGroup.set(s.group, [...(byGroup.get(s.group) ?? []), i]); });
+  for (const [g, idx] of byGroup) {
+    if (idx.length < 2) continue;
+    const med = median(idx.map((i) => budgets[i].target));
+    for (const i of idx) if (Math.abs(budgets[i].target - med) / Math.max(1, med) > 0.22) keys[i] = `${g}#${i}`;
+  }
+  const targets = new Map<string, number>();
+  for (const k of new Set(keys)) targets.set(k, median(keys.flatMap((x, i) => (x === k ? [budgets[i].target] : []))));
+  return { keys, targets };
 }
 
 export function uniqueParts(sections: SongSection[], text?: string): UniquePart[] {
   const src = text ? sectionsWithText(sections, text) : sections;
-  const budgets = sectionBudgets(src);
+  const { keys, targets } = partKeys(src);
   const parts: UniquePart[] = [];
   const names = new Set<string>();
   vocalSections(src).forEach((s, i) => {
-    const key = s.group ?? `s${i}`;
+    const key = keys[i];
     const existing = parts.find((p) => p.key === key);
     if (existing) { existing.repeats++; return; }
     let name = s.tag;
     for (let n = 2; names.has(name.toLowerCase()); n++) name = `${s.tag} ${n}`;
     names.add(name.toLowerCase());
-    parts.push({ name, tag: s.tag, key, target: budgets[i].target, lines: s.lines.map((l) => l.text), repeats: 1, start: s.start, end: s.end });
+    const variantOf = key.includes('#') ? parts.find((p) => p.key === key.split('#')[0])?.name ?? s.tag : undefined;
+    parts.push({ name, tag: s.tag, key, target: targets.get(key)!, lines: s.lines.map((l) => l.text), repeats: 1, start: s.start, end: s.end, variantOf });
   });
   return parts;
 }
@@ -565,7 +589,7 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     matureBlock(matureDark),
   ].join('\n');
   const spec = parts.map((p) => {
-    const rep = p.repeats > 1 ? `, sung ${p.repeats} times — write it once` : '';
+    const rep = (p.repeats > 1 ? `, sung ${p.repeats} times — write it once` : '') + (p.variantOf ? `; a longer/shorter variation of [${p.variantOf}] — reuse its hook lines and fit the target` : '');
     return `[${p.name}] — TARGET ≈ ${p.target} syllables (original: ${p.lines.length} lines, ${fmtTime(p.end - p.start)} of singing${rep}). Original for rhythm reference:\n${p.lines.join('\n')}`;
   }).join('\n\n');
   const user = [
@@ -625,6 +649,19 @@ export function checkRewrite(parts: UniquePart[], parsed: ParsedRewrite): Rewrit
   });
 }
 
+/** Отдельный запрос для секции, которую модель пропустила: короткий и с готовым текстом для связности. */
+export function partMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, part: UniquePart, theme: string, matureDark: boolean,
+  language: string | undefined, context: string) {
+  const msgs = rewriteMessages(song, [part], theme, matureDark, language);
+  const lang = langDef(language || song.language).en;
+  msgs[1] = {
+    role: 'user',
+    content: `${msgs[1].content.replace(/\nWrite the new lyrics now\. \/no_think$/, '')}\n\nThe rest of the new song is already written (keep the same story and style):\n${context}\n\n`
+      + `Write ONLY the [${part.name}] section now, in ${lang}, about ≈ ${part.target} syllables. Even if the original has names or words in another language, write completely new lines. No title. /no_think`,
+  };
+  return msgs;
+}
+
 export function fixMessage(bad: RewriteCheck[]): string {
   const rows = bad.map((c) => `[${c.part.name}] has ${c.actual} syllables, needs ≈ ${c.part.target} — ${c.actual > c.part.target ? 'shorten it' : c.actual === 0 ? 'it is missing, write it' : 'make it longer'}`);
   return `Some sections miss their syllable target:\n${rows.join('\n')}\nRewrite ONLY these sections (same headers, same topic, same format, no title). /no_think`;
@@ -633,11 +670,12 @@ export function fixMessage(bad: RewriteCheck[]): string {
 /** Сборка полного текста по исходной структуре; припев повторяется дословно. */
 export function assembleRewrite(sections: SongSection[], parts: UniquePart[], parsed: ParsedRewrite, text?: string): { text: string; missing: string[] } {
   const src = text ? sectionsWithText(sections, text) : sections;
+  const { keys } = partKeys(src);
   const missing = new Set<string>();
   let i = 0;
   const blocks = src.map((s) => {
     if (s.kind !== 'vocal') return `[${s.tag}]`;
-    const key = s.group ?? `s${i}`;
+    const key = keys[i];
     i++;
     const part = parts.find((p) => p.key === key);
     const lines = part ? parsed.parts.get(part.key) : undefined;

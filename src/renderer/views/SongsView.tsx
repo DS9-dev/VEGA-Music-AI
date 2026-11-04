@@ -331,9 +331,9 @@ function SongDetail(props: {
           )}
 
           {tab === 'orig'
-            ? <LyricsEditor text={text} onChange={setText} params={params} streaming={false} thinking={false} />
+            ? <LyricsEditor songMode text={text} onChange={setText} params={params} streaming={false} thinking={false} />
             : newText || streaming
-              ? <LyricsEditor text={newText} onChange={setNewText} params={newParams} streaming={streaming} thinking={thinking} />
+              ? <LyricsEditor songMode text={newText} onChange={setNewText} params={newParams} streaming={streaming} thinking={thinking} />
               : <div className="instr-empty"><div><div className="big-ic"><IcSparkles size={30} /></div><h3 style={{ margin: '0 0 6px', color: 'var(--text)' }}>Текст на новую тему</h3><div>Задайте тему выше — модель перепишет песню, сохранив её ритм.</div></div></div>}
 
           {tab === 'new' && newText && !streaming && (
