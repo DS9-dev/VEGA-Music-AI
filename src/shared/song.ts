@@ -521,6 +521,7 @@ export interface UniquePart {
   start: number;
   end: number;
   variantOf?: string; // вариант припева другой длины
+  lineTargets: number[]; // слогов в каждой строке (по строкам оригинала)
 }
 
 const median = (xs: number[]) => { const a = [...xs].sort((x, y) => x - y); return a.length ? a[Math.floor((a.length - 1) / 2)] : 0; };
@@ -545,6 +546,16 @@ export function partKeys(src: SongSection[]): { keys: string[]; targets: Map<str
   return { keys, targets };
 }
 
+/** Слоги по строкам оригинала, подогнанные к бюджету секции; очень длинные фразы делятся на две строки. */
+export function lineTargets(lines: string[], target: number): number[] {
+  let raw = lines.map((l) => Math.max(2, countSyllables(l))).flatMap((n) => (n > 16 ? [Math.ceil(n / 2), Math.floor(n / 2)] : [n]));
+  if (!raw.length) raw = [target];
+  const sum = raw.reduce((a, b) => a + b, 0);
+  const k = target / Math.max(1, sum);
+  const out = raw.map((n) => Math.max(3, Math.round(n * k)));
+  return out;
+}
+
 export function uniqueParts(sections: SongSection[], text?: string): UniquePart[] {
   const src = text ? sectionsWithText(sections, text) : sections;
   const { keys, targets } = partKeys(src);
@@ -558,9 +569,27 @@ export function uniqueParts(sections: SongSection[], text?: string): UniquePart[
     for (let n = 2; names.has(name.toLowerCase()); n++) name = `${s.tag} ${n}`;
     names.add(name.toLowerCase());
     const variantOf = key.includes('#') ? parts.find((p) => p.key === key.split('#')[0])?.name ?? s.tag : undefined;
-    parts.push({ name, tag: s.tag, key, target: targets.get(key)!, lines: s.lines.map((l) => l.text), repeats: 1, start: s.start, end: s.end, variantOf });
+    const target = targets.get(key)!;
+    parts.push({ name, tag: s.tag, key, target, lines: s.lines.map((l) => l.text), repeats: 1, start: s.start, end: s.end, variantOf, lineTargets: lineTargets(s.lines.map((l) => l.text), target) });
   });
   return parts;
+}
+
+/** Род рассказчика: в русском и украинском формы глаголов и прилагательных зависят от пола исполнителя. */
+function narratorRule(gender: Song['gender'], lang: string): string {
+  if (!gender) return '';
+  if (lang === 'ru' || lang === 'uk') {
+    return gender === 'male'
+      ? '- The singer is a MAN. Every first-person past-tense verb and adjective must be masculine (я вернулся, я был один, я готов). Never mix genders.'
+      : '- The singer is a WOMAN. Every first-person past-tense verb and adjective must be feminine (я вернулась, я была одна, я готова). Never mix genders.';
+  }
+  return `- The singer is ${gender === 'male' ? 'a man' : 'a woman'}; keep the narrator consistent.`;
+}
+
+function partSpec(p: UniquePart): string {
+  const rep = (p.repeats > 1 ? `, sung ${p.repeats} times — write it once` : '') + (p.variantOf ? `; a longer/shorter variation of [${p.variantOf}] — reuse its hook lines and fit the target` : '');
+  const plan = p.lineTargets.map((n, i) => `${i + 1}) ${n}`).join(', ');
+  return `[${p.name}] — ${p.lineTargets.length} lines, syllables per line: ${plan} (total ≈ ${p.target}${rep}). Original for rhythm reference:\n${p.lines.join('\n')}`;
 }
 
 export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, parts: UniquePart[], theme: string, matureDark: boolean, language?: string) {
@@ -570,13 +599,17 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     'You are an award-winning professional songwriter. You rewrite existing songs on a NEW topic so that the new lyrics can be sung over the ORIGINAL music.',
     `Write ALL sung lines in ${lang.en} only.${lang.code === 'ru' ? ' Use natural, modern, idiomatic Russian with correct word stress that falls naturally on strong beats.' : ''}`,
     '',
-    'KEEP THE MUSICAL SKELETON:',
+    'KEEP THE MUSICAL SKELETON — this matters more than anything else:',
     '- The same sections in the same order, with exactly the section headers given below.',
-    '- Each section must have about the TARGET number of syllables (±10%). This is the most important rule: it makes the words fit the beat. Count syllables carefully.',
+    '- In every section write EXACTLY the given number of lines, one new line per original phrase, and give each line its syllable count (±1). Count the syllables (vowels) of every line before you write it. Short simple words help to stay within the count.',
     ...(translated ? [`- The original is in ${langDef(song.language).en}, but the NEW lyrics must be written in ${lang.en}. Count syllables of the ${lang.en} words.`] : []),
-    '- The number of lines may differ from the original, but similar line lengths and a similar rhyme scheme work best.',
     '- A section that is sung several times (the chorus) is written ONCE; it will be repeated automatically.',
+    '',
+    'MAKE IT A GOOD SONG:',
+    '- Every section rhymes: a clear AABB or ABAB scheme with real end rhymes. No unrhymed lines.',
     '- The chorus is catchy and contains the main hook of the new topic.',
+    '- One clear story with logical, consistent details; each line follows from the previous one.',
+    narratorRule(song.gender, lang.code),
     '- Completely new words and story on the new topic: do not reuse lines or rhymes of the original.',
     ...PLAIN_LINE_RULES,
     '',
@@ -588,17 +621,13 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     '',
     matureBlock(matureDark),
   ].join('\n');
-  const spec = parts.map((p) => {
-    const rep = (p.repeats > 1 ? `, sung ${p.repeats} times — write it once` : '') + (p.variantOf ? `; a longer/shorter variation of [${p.variantOf}] — reuse its hook lines and fit the target` : '');
-    return `[${p.name}] — TARGET ≈ ${p.target} syllables (original: ${p.lines.length} lines, ${fmtTime(p.end - p.start)} of singing${rep}). Original for rhythm reference:\n${p.lines.join('\n')}`;
-  }).join('\n\n');
   const user = [
     `NEW TOPIC / what the new lyrics must be about:\n${theme.trim() || 'Free choice — surprise me with an unexpected topic.'}`,
     '',
     `Singer: ${song.gender === 'female' ? 'female' : song.gender === 'male' ? 'male' : 'unknown'}${song.bpm ? ` · tempo ${song.bpm} BPM` : ''}`,
     '',
     'Sections to write, in this order:',
-    spec,
+    parts.map(partSpec).join('\n\n'),
     '',
     'Write the new lyrics now. /no_think',
   ].join('\n');
@@ -606,6 +635,34 @@ export function rewriteMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 
     { role: 'system', content: system },
     { role: 'user', content: user },
   ];
+}
+
+/**
+ * Запрос для одной секции: пропущенной или промахнувшейся по слогам.
+ * previous — прошлая попытка: модель видит, сколько слогов в каждой её строке и сколько нужно.
+ */
+export function partMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, part: UniquePart, theme: string, matureDark: boolean,
+  language: string | undefined, context: string, previous?: string[]) {
+  const msgs = rewriteMessages(song, [part], theme, matureDark, language);
+  const lang = langDef(language || song.language).en;
+  let feedback = '';
+  if (previous?.length) {
+    const rows = previous.map((l, i) => {
+      const n = countSyllables(l);
+      const want = part.lineTargets[i];
+      const note = want == null ? 'EXTRA line — remove it' : Math.abs(n - want) <= 1 ? 'ok' : n > want ? `too long, needs ${want}` : `too short, needs ${want}`;
+      return `${i + 1}) "${l}" — ${n} syllables: ${note}`;
+    });
+    if (previous.length < part.lineTargets.length) rows.push(`Missing lines: write ${part.lineTargets.length} lines in total.`);
+    const total = previous.reduce((a, l) => a + countSyllables(l), 0);
+    feedback = `\n\nYour previous version of [${part.name}] has ${total} syllables instead of ≈ ${part.target}:\n${rows.join('\n')}\nRewrite it so every line hits its count. Keep the meaning and the rhymes.`;
+  }
+  msgs[1] = {
+    role: 'user',
+    content: `${msgs[1].content.replace(/\nWrite the new lyrics now\. \/no_think$/, '')}\n\nThe rest of the new song is already written (keep the same story and style):\n${context}${feedback}\n\n`
+      + `Write ONLY the [${part.name}] section now, in ${lang}: ${part.lineTargets.length} lines with ${part.lineTargets.join(', ')} syllables. Even if the original has names or words in another language, write completely new lines. No title. /no_think`,
+  };
+  return msgs;
 }
 
 export interface ParsedRewrite { title: string; parts: Map<string, string[]> }
@@ -649,23 +706,6 @@ export function checkRewrite(parts: UniquePart[], parsed: ParsedRewrite): Rewrit
   });
 }
 
-/** Отдельный запрос для секции, которую модель пропустила: короткий и с готовым текстом для связности. */
-export function partMessages(song: Pick<Song, 'language' | 'title' | 'bpm' | 'gender'>, part: UniquePart, theme: string, matureDark: boolean,
-  language: string | undefined, context: string) {
-  const msgs = rewriteMessages(song, [part], theme, matureDark, language);
-  const lang = langDef(language || song.language).en;
-  msgs[1] = {
-    role: 'user',
-    content: `${msgs[1].content.replace(/\nWrite the new lyrics now\. \/no_think$/, '')}\n\nThe rest of the new song is already written (keep the same story and style):\n${context}\n\n`
-      + `Write ONLY the [${part.name}] section now, in ${lang}, about ≈ ${part.target} syllables. Even if the original has names or words in another language, write completely new lines. No title. /no_think`,
-  };
-  return msgs;
-}
-
-export function fixMessage(bad: RewriteCheck[]): string {
-  const rows = bad.map((c) => `[${c.part.name}] has ${c.actual} syllables, needs ≈ ${c.part.target} — ${c.actual > c.part.target ? 'shorten it' : c.actual === 0 ? 'it is missing, write it' : 'make it longer'}`);
-  return `Some sections miss their syllable target:\n${rows.join('\n')}\nRewrite ONLY these sections (same headers, same topic, same format, no title). /no_think`;
-}
 
 /** Сборка полного текста по исходной структуре; припев повторяется дословно. */
 export function assembleRewrite(sections: SongSection[], parts: UniquePart[], parsed: ParsedRewrite, text?: string): { text: string; missing: string[] } {

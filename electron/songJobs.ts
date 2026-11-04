@@ -15,9 +15,9 @@ import type { SongStore } from './songs';
 import type { VoiceStore } from './voices';
 import { runWorker, toolArgs, type WorkerConfig } from './voiceWorker';
 import { DEFAULT_PARAMS, KEYS } from '../src/shared/catalog';
-import { sanitizeLyrics } from '../src/shared/lyrics';
+import { countSyllables, sanitizeLyrics } from '../src/shared/lyrics';
 import {
-  applyCleanup, applyRestructure, assembleRewrite, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, fixMessage, guessGender,
+  applyCleanup, applyRestructure, assembleRewrite, partMessages, restructureMessages, buildLines, buildSections, checkRewrite, cleanupMessages, guessGender,
   parseRewrite, rewriteMessages, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan, type RewriteCheck,
 } from '../src/shared/song';
 import type {
@@ -39,6 +39,10 @@ export interface SongDeps {
   gpuBusy: () => boolean;
   onUpdate: (s: JobState) => void;
 }
+
+/** Секция «в такт», если слоги отличаются не больше чем на 12%. */
+const FIT_OK = 0.12;
+const MAX_FIX_ATTEMPTS = 3;
 
 const IDLE: JobState = { id: '', kind: 'song', phase: 'idle', title: '', progress: 0, step: 0, stageLabel: '', detail: '', elapsedSec: 0, etaSec: null };
 const RUNNING = ['preparing', 'starting', 'generating', 'saving'];
@@ -77,30 +81,20 @@ export async function rewriteSong(
 
   const raw = await stream(messages);
   const parsed = parseRewrite(raw, parts);
-  let checks: RewriteCheck[] = checkRewrite(parts, parsed);
-  const bad = checks.filter((c) => c.level === 'bad');
-  if (bad.length) {
-    // одна попытка поправить только «промахнувшиеся» секции
-    const fixRaw = await stream([...messages, { role: 'assistant', content: raw.replace(/<think>[\s\S]*?<\/think>/gi, '') }, { role: 'user', content: fixMessage(bad) }], `${raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()}\n\n`);
-    const fixed = parseRewrite(fixRaw, parts);
-    for (const c of bad) {
-      const lines = fixed.parts.get(c.part.key);
-      if (!lines?.length) continue;
-      const trial = new Map(parsed.parts);
-      trial.set(c.part.key, lines);
-      const before = checks.find((x) => x.part.key === c.part.key)!;
-      const after = checkRewrite([c.part], { title: '', parts: trial })[0];
-      if (Math.abs(after.actual - c.part.target) < Math.abs(before.actual - c.part.target)) parsed.parts.set(c.part.key, lines);
+  // каждая секция, которая промахнулась по слогам или пропущена, — отдельно, до трёх попыток;
+  // модель видит число слогов в каждой своей строке; остаётся самый близкий к цели вариант
+  const syl = (lines: string[]) => lines.reduce((acc, l) => acc + countSyllables(l), 0);
+  const miss = (lines: string[] | undefined, p: (typeof parts)[number]) => (lines?.length ? Math.abs(syl(lines) - p.target) / Math.max(1, p.target) : 9);
+  for (const part of parts) {
+    let best = parsed.parts.get(part.key);
+    for (let attempt = 0; attempt < MAX_FIX_ATTEMPTS && miss(best, part) > FIT_OK; attempt++) {
+      const context = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics).text;
+      const partRaw = await stream(partMessages(song, part, spec.theme, spec.matureDark, language, context, best), `${context}\n\n`);
+      const got = parseRewrite(partRaw.match(/\[[^\]]+\]/) ? partRaw : `[${part.name}]\n${partRaw}`, [part]).parts.get(part.key);
+      if (got?.length && miss(got, part) < miss(best, part)) { best = got; parsed.parts.set(part.key, got); }
     }
-    checks = checkRewrite(parts, parsed);
   }
-  // пропущенные секции — по одной, отдельным коротким запросом
-  for (const part of parts.filter((p) => !parsed.parts.get(p.key)?.length)) {
-    const context = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics).text;
-    const partRaw = await stream(partMessages(song, part, spec.theme, spec.matureDark, language, context), `${context}\n\n`);
-    const got = parseRewrite(partRaw.match(/\[[^\]]+\]/) ? partRaw : `[${part.name}]\n${partRaw}`, [part]).parts.get(part.key);
-    if (got?.length) parsed.parts.set(part.key, got);
-  }
+  let checks: RewriteCheck[] = checkRewrite(parts, parsed);
   checks = checkRewrite(parts, parsed);
   const assembled = assembleRewrite(song.sections, parts, parsed, spec.text ?? song.lyrics);
   const clean = sanitizeLyrics(assembled.text, { allowBacking: false, lang: language });

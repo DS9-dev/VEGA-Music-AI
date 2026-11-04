@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DEFAULT_PARAMS } from '../src/shared/catalog';
 import {
   applyCleanup, applyRestructure, assembleRewrite, buildLines, buildSections, checkRewrite, lineSimilarity, measureBudgets, parseRewrite,
-  guessGender, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
+  guessGender, lineTargets, rewriteMessages, sectionBudgets, sectionsToLyrics, sectionsWithText, songTrackParams, uniqueParts, vocalSpan,
 } from '../src/shared/song';
 import type { Song, SongWord } from '../src/shared/types';
 
@@ -252,4 +252,16 @@ test('расширенный последний припев — отдельн�
   const out = assembleRewrite(sections, parts, parseRewrite(raw, parts)).text;
   assert.equal(out.match(/короткий припев/g)!.length, 2);
   assert.equal(out.match(/длинный вариант припева/g)!.length, 1);
+});
+
+test('бюджет по строкам: слоги строк оригинала, подогнанные к цели; длинная фраза делится', () => {
+  assert.deepEqual(lineTargets(['Город спит под тёплым дождём', 'Фонари горят за окном'], 16), [8, 8]);
+  assert.deepEqual(lineTargets(['раз два'], 10), [10]);
+  const long = lineTargets(['Одинокий свет над землёй вспыхнул ярко и погас навсегда'], 18);
+  assert.equal(long.length, 2);
+  const parts = uniqueParts(buildSections(buildLines(fakeWords([{ at: 5, lines: V1 }]), 120), 30, 120));
+  const msg = rewriteMessages({ language: 'ru', title: 'T', bpm: 120, gender: 'female' }, parts, 'тема', false);
+  assert.match(msg[1].content, /\[Verse 1\] — 4 lines, syllables per line: 1\) \d+, 2\) \d+, 3\) \d+, 4\) \d+/);
+  assert.match(msg[0].content, /The singer is a WOMAN.*я вернулась/);
+  assert.match(msg[0].content, /AABB or ABAB/);
 });

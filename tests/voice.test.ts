@@ -297,12 +297,16 @@ test('переписывание на тему: бюджет слогов и о�
     gender: 'male' as const, language: 'ru', sections, lyrics: sectionsToLyrics(sections), warnings: [] };
   const lm = fakeLm([
     'TITLE: Зимний вечер\n[Chorus]\nВечер мой холодный вечер\nСнег ложится мне на плечи\n[Verse 1]\nКороткая строка',
-    '[Verse 1]\nТихо падает на крыши снег\nЗамедляет время свой разбег',
+    '[Verse 1]\nТихо падает на крыши снег\nВремя замедляет бег',
   ]);
   const chunks: string[] = [];
   const r = await rewriteSong(lm as any, defaultSettings('/tmp/x'), song, { theme: 'зима', matureDark: false }, (c) => chunks.push(c.text), new AbortController().signal);
   assert.equal(lm.calls.length, 2, 'вторая попытка — только для промахнувшегося куплета');
-  assert.match(lm.calls[1].at(-1)!.content, /\[Verse 1\] has \d+ syllables/);
+  const fix = lm.calls[1].at(-1)!.content;
+  assert.match(fix, /previous version of \[Verse 1\] has 6 syllables/);
+  assert.match(fix, /"Короткая строка" — 6 syllables: too short, needs 8/);
+  assert.match(fix, /Missing lines: write 2 lines/);
+  assert.match(lm.calls[0][0].content, /The singer is a MAN/);
   assert.equal(r.title, 'Зимний вечер');
   assert.equal(r.text.match(/Вечер мой холодный вечер/g)!.length, 2);
   assert.match(r.text, /Тихо падает на крыши снег/);
@@ -319,13 +323,11 @@ test('переписывание: пропущенная секция допис
   const song = { id: 's', title: 'T', createdAt: '', status: 'ready' as const, sourceName: '', source: 'source.wav', duration: 30, bpm: 120, key: null,
     gender: 'male' as const, language: 'en', sections, lyrics: sectionsToLyrics(sections), warnings: [] };
   const lm = fakeLm([
-    'TITLE: Дом\n[Verse 1]\nСнова дома я',
-    '[Verse 1]\nСнова дома я',
+    'TITLE: Дом\n[Verse 1]\nВечер мой тихий опять настал',
     'Тихий вечер над рекой опять',
   ]);
   const r = await rewriteSong(lm as any, defaultSettings('/tmp/x'), song, { theme: 'дом', matureDark: false, language: 'ru' }, () => {}, new AbortController().signal);
-  assert.equal(lm.calls.length, 3);
-  assert.match(lm.calls[2].at(-1)!.content, /Write ONLY the \[Bridge\] section now, in Russian/);
+  assert.match(lm.calls[1].at(-1)!.content, /Write ONLY the \[Bridge\] section now, in Russian/);
   assert.match(r.text, /Тихий вечер над рекой опять/);
   assert.ok(!r.warnings.some((w) => /не написала/.test(w)), r.warnings.join('; '));
 });
